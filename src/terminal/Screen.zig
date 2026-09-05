@@ -61,6 +61,19 @@ saved_cursor: ?SavedCursor = null,
 /// automatically setup tracking.
 selection: ?Selection = null,
 
+/// True when caret (keyboard navigation) mode is active.
+caret_mode: bool = false,
+
+caret_viewport_pin: ?*Pin = null,
+
+/// Tracked position of the caret for keyboard navigation. Always a tracked
+/// pin so it stays valid as the buffer scrolls. Null when caret_mode is false.
+caret_pin: ?*Pin = null,
+
+/// Anchor for line-wise caret selection. When set, movement can only extend
+/// the selection by complete logical lines.
+caret_line_selection_anchor: ?*Pin = null,
+
 /// The charset state
 charset: CharsetState = .{},
 
@@ -95,6 +108,7 @@ pub const Dirty = packed struct {
     /// When an OSC8 hyperlink is hovered, we set the full screen as dirty
     /// because links can span multiple lines.
     hyperlink_hover: bool = false,
+
 };
 
 pub const SemanticPrompt = struct {
@@ -2877,6 +2891,8 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
 /// managing memory for you, it also performs safety checks that the selection
 /// is always tracked.
 pub fn select(self: *Screen, sel_: ?Selection) Allocator.Error!void {
+    self.clearCaretLineSelection();
+
     const sel = sel_ orelse {
         self.clearSelection();
         return;
@@ -2914,11 +2930,393 @@ pub fn select(self: *Screen, sel_: ?Selection) Allocator.Error!void {
 
 /// Same as select(null) but can't fail.
 pub fn clearSelection(self: *Screen) void {
+    self.clearCaretLineSelection();
+
     if (self.selection) |*sel| {
         sel.deinit(self);
         self.dirty.selection = true;
     }
     self.selection = null;
+}
+
+fn clearCaretLineSelection(self: *Screen) void {
+    if (self.caret_line_selection_anchor) |pin| {
+        self.pages.untrackPin(pin);
+        self.caret_line_selection_anchor = null;
+    }
+}
+
+/// Enter caret mode. The caret is initialized at the current terminal
+/// cursor position. If already in caret mode this is a no-op.
+pub fn enterCaretMode(self: *Screen) Allocator.Error!void {
+    if (self.caret_mode) return;
+
+    const viewport_tl = self.pages.getTopLeft(.viewport);
+    self.pages.pinViewport(viewport_tl);
+
+    const tracked = try self.pages.trackPin(self.cursor.page_pin.*);
+    errdefer self.pages.untrackPin(tracked);
+
+    const viewport_pin = try self.pages.trackPin(viewport_tl);
+    self.caret_viewport_pin = viewport_pin;
+
+    self.caret_pin = tracked;
+
+    self.caret_mode = true;
+}
+
+/// Exit caret mode, releasing the tracked caret pin and clearing any
+/// active selection. Copy before exiting if you want to keep the selection.
+pub fn exitCaretMode(self: *Screen) void {
+    if (!self.caret_mode) return;
+    if (self.caret_pin) |pin| {
+        self.pages.untrackPin(pin);
+        self.caret_pin = null;
+    }
+    if (self.caret_viewport_pin) |pin| {
+        self.pages.untrackPin(pin);
+        self.caret_viewport_pin = null;
+    }
+    self.caret_mode = false;
+    self.clearSelection();
+}
+
+pub const CaretAdjustment = enum {
+    left,
+    right,
+    up,
+    down,
+    page_up,
+    page_down,
+    half_page_up,
+    half_page_down,
+    home,
+    end,
+    beginning_of_line,
+    first_non_blank,
+    end_of_line,
+    word_left,
+    word_right,
+    word_left_whitespace,
+    word_right_whitespace,
+};
+
+/// Move the caret by the given adjustment. If a selection is active its
+/// end point is updated to follow the caret. No-op if caret mode is inactive.
+pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
+    const pin = self.caret_pin orelse return;
+    switch (adjustment) {
+        .up => if (pin.up(1)) |new_pin| {
+            pin.* = new_pin;
+        },
+
+        .down => if (pin.down(1)) |new_pin| {
+            pin.* = new_pin;
+        },
+
+        .left => {
+            var it = pin.cellIterator(.left_up, null);
+            _ = it.next();
+            if (it.next()) |next| pin.* = next;
+        },
+
+        .right => {
+            var it = pin.cellIterator(.right_down, null);
+            _ = it.next();
+            if (it.next()) |next| pin.* = next;
+        },
+
+        .page_up => if (pin.up(self.pages.rows)) |new_pin| {
+            pin.* = new_pin;
+        } else {
+            while (pin.up(1)) |new_pin| pin.* = new_pin;
+        },
+
+        .page_down => if (pin.down(self.pages.rows)) |new_pin| {
+            pin.* = new_pin;
+        } else {
+            while (pin.down(1)) |new_pin| pin.* = new_pin;
+        },
+
+        .half_page_up => {
+            const rows = @max(self.pages.rows / 2, 1);
+            if (pin.up(rows)) |new_pin| {
+                pin.* = new_pin;
+            } else {
+                while (pin.up(1)) |new_pin| pin.* = new_pin;
+            }
+        },
+
+        .half_page_down => {
+            const rows = @max(self.pages.rows / 2, 1);
+            if (pin.down(rows)) |new_pin| {
+                pin.* = new_pin;
+            } else {
+                while (pin.down(1)) |new_pin| pin.* = new_pin;
+            }
+        },
+
+        .home => pin.* = self.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?,
+
+        .end => {
+            var it = self.pages.rowIterator(.left_up, .{ .screen = .{} }, null);
+            while (it.next()) |next| {
+                const rac = next.rowAndCell();
+                const cells = next.node.page().getCells(rac.row);
+                if (Cell.hasTextAny(cells)) {
+                    pin.* = next;
+                    pin.x = @intCast(cells.len - 1);
+                    break;
+                }
+            }
+        },
+
+        .beginning_of_line => pin.x = 0,
+
+        .first_non_blank => {
+            pin.x = 0;
+            const rac = pin.rowAndCell();
+            const cells = pin.node.page().getCells(rac.row);
+            for (cells, 0..) |*cell, x| {
+                if (isCaretWordCell(cell)) {
+                    pin.x = @intCast(x);
+                    break;
+                }
+            }
+        },
+
+        .end_of_line => {
+            pin.x = 0;
+            const rac = pin.rowAndCell();
+            const cells = pin.node.page().getCells(rac.row);
+            var x = cells.len;
+            while (x > 0) {
+                x -= 1;
+                if (isCaretWordCell(&cells[x])) {
+                    pin.x = @intCast(x);
+                    break;
+                }
+            }
+        },
+
+        .word_left => {
+            var it = pin.cellIterator(.left_up, null);
+            _ = it.next();
+
+            var target: ?Pin = null;
+            var target_class: ?CaretWordClass = null;
+            while (it.next()) |next| {
+                const class = caretWordClass(next.rowAndCell().cell);
+                if (class == .whitespace) {
+                    if (target != null) break;
+                    continue;
+                }
+
+                if (target_class) |expected| {
+                    if (class != expected) break;
+                } else {
+                    target_class = class;
+                }
+
+                target = next;
+            }
+
+            if (target) |next| pin.* = next;
+        },
+
+        .word_right => {
+            var it = pin.cellIterator(.right_down, null);
+            const current = it.next() orelse unreachable;
+            const current_class = caretWordClass(current.rowAndCell().cell);
+            var current_word_end = current;
+            var left_current_word = current_class == .whitespace;
+            var next_line: ?Pin = null;
+
+            while (it.next()) |next| {
+                if (next_line == null and next.x == 0) next_line = next;
+
+                const class = caretWordClass(next.rowAndCell().cell);
+                if (!left_current_word) {
+                    if (class == current_class) {
+                        current_word_end = next;
+                        continue;
+                    }
+                    left_current_word = true;
+                }
+
+                if (class == .whitespace) continue;
+
+                pin.* = next;
+                break;
+            } else if (!current.eql(current_word_end)) {
+                pin.* = current_word_end;
+            } else if (next_line) |next| {
+                pin.* = next;
+            }
+        },
+
+        .word_left_whitespace => {
+            var it = pin.cellIterator(.left_up, null);
+            _ = it.next();
+
+            var seen_text = false;
+            while (it.next()) |next| {
+                if (isCaretWordCell(next.rowAndCell().cell)) {
+                    pin.* = next;
+                    seen_text = true;
+                    break;
+                }
+            }
+
+            if (seen_text) {
+                while (it.next()) |next| {
+                    if (!isCaretWordCell(next.rowAndCell().cell)) break;
+                    pin.* = next;
+                }
+            }
+        },
+
+        .word_right_whitespace => {
+            var it = pin.cellIterator(.right_down, null);
+            _ = it.next();
+
+            var seen_text = false;
+            var next_line: ?Pin = null;
+            while (it.next()) |next| {
+                if (next_line == null and next.x == 0) next_line = next;
+
+                if (isCaretWordCell(next.rowAndCell().cell)) {
+                    pin.* = next;
+                    seen_text = true;
+                    break;
+                }
+            }
+
+            if (seen_text) {
+                while (it.next()) |next| {
+                    if (!isCaretWordCell(next.rowAndCell().cell)) break;
+                    pin.* = next;
+                }
+            } else if (next_line) |next| {
+                pin.* = next;
+            }
+        },
+    }
+
+    if (self.caret_line_selection_anchor) |anchor| {
+        const anchor_line = self.selectLine(.{
+            .pin = anchor.*,
+            .whitespace = null,
+            .semantic_prompt_boundary = false,
+        }) orelse return;
+        const caret_line = self.selectLine(.{
+            .pin = pin.*,
+            .whitespace = null,
+            .semantic_prompt_boundary = false,
+        }) orelse return;
+        const sel = &(self.selection orelse return);
+
+        if (pin.before(anchor.*)) {
+            sel.startPtr().* = caret_line.start();
+            sel.endPtr().* = anchor_line.end();
+        } else {
+            sel.startPtr().* = anchor_line.start();
+            sel.endPtr().* = caret_line.end();
+        }
+        sel.rectangle = false;
+        self.dirty.selection = true;
+        return;
+    }
+
+    // If a selection is active, extend its end to follow the caret.
+    if (self.selection) |*sel| {
+        sel.endPtr().* = pin.*;
+        self.dirty.selection = true;
+    }
+}
+
+/// Start a line-wise selection at the caret. While active, all movement keeps
+/// the selection aligned to complete logical line boundaries.
+pub fn selectCaretLine(self: *Screen) Allocator.Error!bool {
+    const caret = self.caret_pin orelse return false;
+    const sel = self.selectLine(.{
+        .pin = caret.*,
+        .whitespace = null,
+        .semantic_prompt_boundary = false,
+    }) orelse return false;
+
+    self.clearSelection();
+    const anchor = try self.pages.trackPin(caret.*);
+    errdefer self.pages.untrackPin(anchor);
+    try self.select(sel);
+    self.caret_line_selection_anchor = anchor;
+    return true;
+}
+
+const CaretWordClass = enum {
+    whitespace,
+    keyword,
+    punctuation,
+};
+
+fn caretWordClass(cell: *const Cell) CaretWordClass {
+    if (!cell.hasText()) return .whitespace;
+
+    const cp = cell.codepoint();
+    if (cp == 0 or cp == ' ' or cp == '\t') return .whitespace;
+
+    if ((cp >= 'a' and cp <= 'z') or
+        (cp >= 'A' and cp <= 'Z') or
+        (cp >= '0' and cp <= '9') or
+        cp == '_' or
+        cp >= 0x80)
+    {
+        return .keyword;
+    }
+
+    return .punctuation;
+}
+
+fn isCaretWordCell(cell: *const Cell) bool {
+    return caretWordClass(cell) != .whitespace;
+}
+
+test "Screen: caret first non-blank" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(testing.io, alloc, .{ .cols = 12, .rows = 5, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+
+    try s.testWriteString("   hello  ");
+    try s.enterCaretMode();
+    defer s.exitCaretMode();
+
+    s.moveCaret(.first_non_blank);
+    try testing.expectEqual(3, s.caret_pin.?.x);
+
+    s.moveCaret(.end_of_line);
+    try testing.expectEqual(7, s.caret_pin.?.x);
+}
+
+test "Screen: caret half-page movement" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(testing.io, alloc, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 20 });
+    defer s.deinit();
+
+    for (0..20) |_| try s.testWriteString("line\n");
+    try s.enterCaretMode();
+    defer s.exitCaretMode();
+
+    const initial = s.caret_pin.?.*;
+    const expected_up = initial.up(5).?;
+    s.moveCaret(.half_page_up);
+    try testing.expect(s.caret_pin.?.eql(expected_up));
+
+    s.moveCaret(.half_page_down);
+    try testing.expect(s.caret_pin.?.eql(initial));
 }
 
 pub const SelectionString = struct {
