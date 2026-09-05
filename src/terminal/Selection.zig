@@ -407,6 +407,8 @@ pub const Adjustment = lib.Enum(lib.target, &.{
     "page_down",
     "beginning_of_line",
     "end_of_line",
+    "word_left",
+    "word_right",
 });
 
 /// Adjust the selection by some given adjustment. An adjustment allows
@@ -507,7 +509,61 @@ pub fn adjust(
         .beginning_of_line => end_pin.x = 0,
 
         .end_of_line => end_pin.x = end_pin.node.cols() - 1,
+
+        .word_left => {
+            var it = end_pin.cellIterator(.left_up, null);
+            _ = it.next();
+
+            var seen_text = false;
+            while (it.next()) |next| {
+                const rac = next.rowAndCell();
+                if (isWordCell(rac.cell)) {
+                    end_pin.* = next;
+                    seen_text = true;
+                    break;
+                }
+            }
+
+            if (seen_text) {
+                while (it.next()) |next| {
+                    const rac = next.rowAndCell();
+                    if (!isWordCell(rac.cell)) break;
+                    end_pin.* = next;
+                }
+            }
+        },
+
+        .word_right => {
+            var it = end_pin.cellIterator(.right_down, null);
+            _ = it.next();
+
+            var seen_text = false;
+            while (it.next()) |next| {
+                const rac = next.rowAndCell();
+                if (isWordCell(rac.cell)) {
+                    end_pin.* = next;
+                    seen_text = true;
+                    break;
+                }
+            }
+
+            if (seen_text) {
+                while (it.next()) |next| {
+                    const rac = next.rowAndCell();
+                    if (!isWordCell(rac.cell)) break;
+                    end_pin.* = next;
+                }
+            }
+        },
     }
+}
+
+fn isWordCell(cell: *const page.Cell) bool {
+    if (!cell.hasText()) return false;
+    return switch (cell.codepoint()) {
+        0, ' ', '\t' => false,
+        else => true,
+    };
 }
 
 test "Selection: adjust right" {
