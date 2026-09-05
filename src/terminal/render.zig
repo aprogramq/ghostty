@@ -88,6 +88,10 @@ pub const RenderState = struct {
     /// Cursor state within the viewport.
     cursor: Cursor,
 
+    /// Caret position within the viewport. Null when caret mode is inactive
+    /// or the caret is scrolled out of view.
+    caret: ?Cursor.Viewport = null,
+
     /// The rows (y=0 is top) of the viewport. Guaranteed to be `rows` length.
     ///
     /// This is a MultiArrayList because only the update cares about
@@ -349,6 +353,70 @@ pub const RenderState = struct {
         self.endUpdate();
     }
 
+    /// Update only caret-related state while preserving the previously copied
+    /// viewport rows. This is used to freeze visible contents during caret mode
+    /// without pausing terminal output in the background.
+    pub fn updateCaretOnly(self: *RenderState, t: *Terminal) bool {
+        const s: *Screen = t.screens.active;
+
+        const viewport_pin = self.viewport_pin orelse return false;
+        const caret_viewport_pin = if (s.caret_viewport_pin) |pin|
+            pin.*
+        else
+            s.pages.getTopLeft(.viewport);
+
+        if (!viewport_pin.eql(caret_viewport_pin)) return false;
+
+        self.cursor.visible = false;
+        self.caret = null;
+        self.dirty = .full;
+
+        const row_data = self.row_data.slice();
+        const row_pins = row_data.items(.pin);
+        const row_sels = row_data.items(.selection);
+        @memset(row_sels, null);
+
+        const cp = s.caret_pin orelse {
+            self.updateSelection(s, row_pins, row_sels, true, true);
+            return true;
+        };
+
+        if (s.caret_line_selection_anchor == null) {
+            var y: usize = 0;
+            var page_it = viewport_pin.pageIterator(.right_down, null);
+            while (y < self.rows) {
+                const chunk = page_it.next() orelse break;
+                const node = chunk.node;
+
+                const take: usize = @min(
+                    @as(usize, chunk.end - chunk.start),
+                    self.rows - y,
+                );
+
+                if (cp.node == node) {
+                    const cy = cp.y;
+                    if (cy >= chunk.start and cy < chunk.start + take) {
+                        const rac = cp.rowAndCell();
+                        self.caret = .{
+                            .y = @intCast(y + (cy - chunk.start)),
+                            .x = cp.x,
+                            .wide_tail = if (cp.x > 0)
+                                rac.cell.wide == .spacer_tail
+                            else
+                                false,
+                        };
+                        break;
+                    }
+                }
+
+                y += take;
+            }
+        }
+
+        self.updateSelection(s, row_pins, row_sels, true, true);
+        return true;
+    }
+
     /// Begin an update of the render state to the latest terminal
     /// state. Every begin must be completed with an `endUpdate` call
     /// before the render state is read.
@@ -376,7 +444,10 @@ pub const RenderState = struct {
         t: *Terminal,
     ) Allocator.Error!void {
         const s: *Screen = t.screens.active;
-        const viewport_pin = s.pages.getTopLeft(.viewport);
+        const viewport_pin = if (s.caret_mode)
+            if (s.caret_viewport_pin) |pin| pin.* else s.pages.getTopLeft(.viewport)
+        else
+            s.pages.getTopLeft(.viewport);
         const redraw = redraw: {
             // If our screen key changed, we need to do a full rebuild
             // because our render state is viewport-specific.
@@ -429,6 +500,10 @@ pub const RenderState = struct {
         // probably cache this by comparing the cursor pin and viewport pin
         // but may not be worth it.
         self.cursor.viewport = null;
+        self.caret = null;
+        if (s.caret_mode) {
+            self.cursor.visible = false;
+        }
 
         // Colors.
         self.colors.cursor = t.colors.cursor.get();
@@ -578,6 +653,41 @@ pub const RenderState = struct {
             // this iteration and we're the only consumer of dirty state.
             const page_dirty = p.dirty;
             if (page_dirty) p.dirty = false;
+            // Find the caret position within the viewport.
+            if (s.caret_mode and s.caret_line_selection_anchor == null) {
+                if (self.caret == null) {
+                    if (s.caret_pin) |cp| {
+                        if (cp.node == node) {
+                            const cy = cp.y;
+                            if (cy >= chunk.start and cy < chunk.start + take) {
+                                const rac = cp.rowAndCell();
+                                self.caret = .{
+                                    .y = @intCast(y + (cy - chunk.start)),
+                                    .x = cp.x,
+                                    .wide_tail = if (cp.x > 0)
+                                        rac.cell.wide == .spacer_tail
+                                    else
+                                        false,
+                                };
+                            }
+                        }
+                        // const row_pin: PageList.Pin = .{
+                        //     .node = node,
+                        //     .y = @intCast(chunk.start),
+                        // };
+                        // if (row_pin.node == cp.node and row_pin.y == cp.y) {
+                    }
+                }
+            }
+
+            // Store our pin. We have to store these even if we're not dirty
+            // because dirty is only a renderer optimization. It doesn't
+            // apply to memory movement. This will let us remap any cell
+            // pins back to an exact entry in our RenderState.
+            row_pins[y] = .{
+                .node = node,
+                .y = @intCast(chunk.start),
+            };
 
             // Get our contiguous rows for this chunk.
             const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..][0..take];
@@ -663,6 +773,33 @@ pub const RenderState = struct {
         // There are performance improvements that can be made here, though.
         // For example, `containedRow` recalculates a bunch of information
         // we can cache.
+        self.updateSelection(s, row_pins, row_sels, redraw, any_dirty);
+
+        // Handle dirty state.
+        if (redraw) {
+            // Fully redraw resets some other state.
+            self.screen = t.screens.active_key;
+            self.dirty = .full;
+
+            // Note: we don't clear any row_data here because our rebuild
+            // above did this.
+        } else if (any_dirty and self.dirty == .false) {
+            self.dirty = .partial;
+        }
+
+        // Clear our dirty flags
+        t.flags.dirty = .{};
+        s.dirty = .{};
+    }
+
+    fn updateSelection(
+        self: *RenderState,
+        s: *Screen,
+        row_pins: []const PageList.Pin,
+        row_sels: []?[2]size.CellCountInt,
+        redraw: bool,
+        any_dirty: bool,
+    ) void {
         if (s.selection) |*sel| selection: {
             @branchHint(.unlikely);
 
@@ -725,23 +862,7 @@ pub const RenderState = struct {
                 assert(start.y == end.y);
                 sel_bounds.* = .{ start.x, end.x };
             }
-        }
-
-        // Handle dirty state.
-        if (redraw) {
-            // Fully redraw resets some other state.
-            self.screen = t.screens.active_key;
-            self.dirty = .full;
-
-            // Note: we don't clear any row_data here because our rebuild
-            // above did this.
-        } else if (any_dirty and self.dirty == .false) {
-            self.dirty = .partial;
-        }
-
-        // Clear our dirty flags
-        t.flags.dirty = .{};
-        s.dirty = .{};
+        } else self.selection_cache = null;
     }
 
     /// Complete a prior `beginUpdate` call by performing any deferred

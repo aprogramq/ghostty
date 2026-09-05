@@ -234,6 +234,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The render state we update per loop.
         terminal_state: terminal.RenderState = .empty,
 
+        /// True after we've captured a render-state snapshot for caret mode.
+        terminal_state_frozen_caret: bool = false,
+
         /// The number of frames since the last terminal state reset.
         /// We reset the terminal state after ~100,000 frames (about 10 to
         /// 15 minutes at 120Hz) to prevent wasted memory buildup from
@@ -1289,6 +1292,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.terminal_state.deinit(self.alloc);
                 self.terminal_state = .empty;
                 self.terminal_state_frame_count = 0;
+                self.terminal_state_frozen_caret = false;
             }
             self.terminal_state_frame_count += 1;
 
@@ -1304,6 +1308,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 preedit: ?renderer.State.Preedit,
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
+                terminal_state_began: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1333,6 +1338,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update this BEFORE we update our render state so we can
                 // draw the new scrolled data immediately.
                 if (self.config.scroll_to_bottom_on_output) scroll: {
+                    if (state.terminal.screens.active.caret_mode) break :scroll;
+
                     const br = state.terminal.screens.active.pages.getBottomRight(.screen) orelse break :scroll;
 
                     // If the pin hasn't changed, then don't scroll.
@@ -1347,15 +1354,28 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
-                // Begin the update of our terminal state. Work that
-                // doesn't require terminal access (e.g. style
-                // denormalization) is deferred to the endUpdate call
-                // outside of this critical section, keeping our lock
-                // hold time as short as possible.
-                try self.terminal_state.beginUpdate(
-                    self.alloc,
-                    state.terminal,
-                );
+                const screen = state.terminal.screens.active;
+                const frozen_caret = screen.caret_mode and
+                    self.terminal_state_frozen_caret and
+                    self.terminal_state.rows == screen.pages.rows and
+                    self.terminal_state.cols == screen.pages.cols;
+
+                const caret_only = frozen_caret and
+                    self.terminal_state.updateCaretOnly(state.terminal);
+
+                if (!caret_only) {
+                    // Begin the update of our terminal state. Work that
+                    // doesn't require terminal access (e.g. style
+                    // denormalization) is deferred to the endUpdate call
+                    // outside of this critical section, keeping our lock
+                    // hold time as short as possible.
+                    try self.terminal_state.beginUpdate(
+                        self.alloc,
+                        state.terminal,
+                    );
+                }
+
+                self.terminal_state_frozen_caret = screen.caret_mode;
 
                 // If our terminal state is dirty at all we need to redo
                 // the viewport search.
@@ -1458,13 +1478,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
+                    .terminal_state_began = !caret_only,
                 };
             };
 
             // Outside the critical area, complete the update we began
             // within it. This must be done before anything reads the
             // render state (e.g. rebuildCells).
-            self.terminal_state.endUpdate();
+            if (critical.terminal_state_began) {
+                self.terminal_state.endUpdate();
+            }
 
             // Outside the critical area we can update our links to contain
             // our regex results.
@@ -2791,6 +2814,70 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
+            // Draw the keyboard-navigation caret as a block cursor. The block
+            // is placed before the row glyphs, and cursor_pos makes the shader
+            // recolor the glyph inside it just like the regular block cursor.
+            caret: {
+                const caret_vp = state.caret orelse break :caret;
+                const caret_cell = state.row_data.items(.cells)[caret_vp.y].get(caret_vp.x);
+                const caret_style: terminal.Style = if (caret_cell.raw.hasStyling())
+                    caret_cell.style
+                else
+                    .{};
+                const wide = caret_vp.wide_tail or caret_cell.raw.wide == .wide;
+                const x = if (caret_vp.wide_tail)
+                    caret_vp.x -| 1
+                else
+                    caret_vp.x;
+
+                self.addCursor(&.{
+                    .active = .{ .x = caret_vp.x, .y = caret_vp.y },
+                    .viewport = caret_vp,
+                    .cell = caret_cell.raw,
+                    .style = caret_style,
+                    .visual_style = .block,
+                    .password_input = false,
+                    .visible = true,
+                    .blinking = false,
+                }, .block, state.colors.foreground);
+
+                self.uniforms.cursor_pos = .{ x, caret_vp.y };
+                self.uniforms.bools.cursor_wide = wide;
+
+                const caret_text_color = if (self.config.cursor_text) |txt| blk: {
+                    if (txt == .color) break :blk txt.color.toTerminalRGB();
+
+                    const fg_style = caret_style.fg(.{
+                        .default = state.colors.foreground,
+                        .palette = &state.colors.palette,
+                        .bold = self.config.bold_color,
+                    });
+                    const bg_style = caret_style.bg(
+                        &caret_cell.raw,
+                        &state.colors.palette,
+                    ) orelse state.colors.background;
+
+                    break :blk switch (txt) {
+                        .@"cell-foreground" => if (caret_style.flags.inverse)
+                            bg_style
+                        else
+                            fg_style,
+                        .@"cell-background" => if (caret_style.flags.inverse)
+                            fg_style
+                        else
+                            bg_style,
+                        else => unreachable,
+                    };
+                } else state.colors.background;
+
+                self.uniforms.cursor_color = .{
+                    caret_text_color.r,
+                    caret_text_color.g,
+                    caret_text_color.b,
+                    255,
+                };
+            }
+
             // Setup our preedit text.
             if (preedit) |preedit_v| preedit: {
                 const range = preedit_range orelse break :preedit;
@@ -2875,10 +2962,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .cells = cells_slice,
                 .selection = if (selection) |s| s else null,
 
-                // We want to do font shaping as long as the cursor is
-                // visible on this viewport.
+                // Break shaping at the visible caret or terminal cursor so
+                // the glyph under a block cursor can be recolored separately.
                 .cursor_x = cursor_x: {
-                    const vp = state.cursor.viewport orelse break :cursor_x null;
+                    const vp = state.caret orelse
+                        state.cursor.viewport orelse break :cursor_x null;
                     if (vp.y != y) break :cursor_x null;
                     break :cursor_x vp.x;
                 },

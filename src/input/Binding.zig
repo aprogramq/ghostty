@@ -507,6 +507,36 @@ pub const Action = union(enum) {
     ///
     adjust_selection: AdjustSelection,
 
+    /// Enter caret (keyboard navigation) mode. The caret is placed at the
+    /// current terminal cursor position. Also pushes the "caret" key table.
+    /// No-op if caret mode is already active.
+    enter_caret_mode,
+
+    /// Exit caret mode. Also pops the "caret" key table.
+    exit_caret_mode,
+
+    /// Move the caret in caret mode. No-op if caret mode is not active.
+    ///
+    /// Valid arguments are:
+    /// `left`, `right`, `up`, `down`, `page_up`, `page_down`,
+    /// `half_page_up`, `half_page_down`, `home`, `end`,
+    /// `beginning_of_line`, `first_non_blank`, `end_of_line`, `word_left`,
+    /// `word_right`, `word_left_whitespace`, `word_right_whitespace`.
+    move_caret: MoveCaret,
+
+    /// Toggle a selection anchored at the caret position. If no selection
+    /// exists, one is created at the current caret. If a selection exists,
+    /// it is cleared. No-op if caret mode is not active.
+    toggle_caret_selection,
+
+    /// Toggle a rectangular selection anchored at the caret position. An
+    /// existing non-rectangular selection is converted while preserving its
+    /// anchor. No-op if caret mode is not active.
+    toggle_caret_rectangle_selection,
+
+    /// Select the entire line under the caret when in caret mode.
+    select_caret_line,
+
     /// Jump the viewport forward or back by the given number of prompts.
     ///
     /// Requires shell integration.
@@ -1052,6 +1082,26 @@ pub const Action = union(enum) {
         end_of_line,
     };
 
+    pub const MoveCaret = enum {
+        left,
+        right,
+        up,
+        down,
+        page_up,
+        page_down,
+        half_page_up,
+        half_page_down,
+        home,
+        end,
+        beginning_of_line,
+        first_non_blank,
+        end_of_line,
+        word_left,
+        word_right,
+        word_left_whitespace,
+        word_right_whitespace,
+    };
+
     pub const SplitDirection = enum {
         right,
         down,
@@ -1417,6 +1467,12 @@ pub const Action = union(enum) {
             .scroll_page_fractional,
             .scroll_page_lines,
             .adjust_selection,
+            .enter_caret_mode,
+            .exit_caret_mode,
+            .move_caret,
+            .toggle_caret_selection,
+            .toggle_caret_rectangle_selection,
+            .select_caret_line,
             .jump_to_prompt,
             .write_scrollback_file,
             .write_screen_file,

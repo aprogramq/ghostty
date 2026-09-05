@@ -3459,6 +3459,26 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
     }
 }
 
+/// Pin the viewport to the given position, even if that position is currently
+/// within the active area. This prevents the viewport from following new output.
+pub fn pinViewport(self: *PageList, p: Pin) void {
+    defer self.assertIntegrity();
+
+    if (self.limits.bytes.explicit == 0) {
+        self.viewport = .active;
+        return;
+    }
+
+    if (self.pinIsTop(p)) {
+        self.viewport = .top;
+        return;
+    }
+
+    self.viewport_pin.* = p;
+    self.viewport = .pin;
+    self.viewport_pin_row_offset = null;
+}
+
 /// Jump the viewport forwards (positive) or backwards (negative) a set number of
 /// prompts (delta).
 fn scrollPrompt(self: *PageList, delta: isize) void {
