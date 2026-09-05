@@ -5701,19 +5701,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 }
             }
 
-            // Scroll viewport to show the caret (it starts at the terminal
-            // cursor which is always in the active area, so this is a no-op
-            // in the common case but handles edge cases).
-            if (screen.caret_pin) |cp| caret_scroll: {
-                const viewport_tl = screen.pages.getTopLeft(.viewport);
-                const viewport_br = screen.pages.getBottomRight(.viewport).?;
-                if (cp.*.isBetween(viewport_tl, viewport_br)) break :caret_scroll;
-                screen.scroll(.{ .pin = cp.* });
-                if (screen.caret_viewport_pin) |vp| {
-                    vp.* = screen.pages.getTopLeft(.viewport);
-                }
-            }
-
             try self.queueRender();
         },
 
