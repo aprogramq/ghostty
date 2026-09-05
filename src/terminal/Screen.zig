@@ -2988,6 +2988,7 @@ pub fn exitCaretMode(self: *Screen) void {
     }
     self.caret_mode = false;
     self.clearSelection();
+    self.scroll( .{.active = {}} );
 }
 
 pub const CaretAdjustment = enum {
