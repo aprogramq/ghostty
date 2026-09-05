@@ -508,8 +508,9 @@ pub const Action = union(enum) {
     adjust_selection: AdjustSelection,
 
     /// Enter caret (keyboard navigation) mode. The caret is placed at the
-    /// current terminal cursor position. Also pushes the "caret" key table.
-    /// No-op if caret mode is already active.
+    /// terminal cursor when it is visible, or at the bottom of the current
+    /// viewport at the cursor's column otherwise. Also pushes the "caret" key
+    /// table. No-op if caret mode is already active.
     enter_caret_mode,
 
     /// Exit caret mode. Also pops the "caret" key table.
