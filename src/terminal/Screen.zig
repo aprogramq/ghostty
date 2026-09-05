@@ -2947,14 +2947,23 @@ fn clearCaretLineSelection(self: *Screen) void {
 }
 
 /// Enter caret mode. The caret is initialized at the current terminal
-/// cursor position. If already in caret mode this is a no-op.
+/// cursor position when it is visible. If the cursor is outside the viewport,
+/// the caret starts at the bottom of the viewport at the cursor's column.
+/// If already in caret mode this is a no-op.
 pub fn enterCaretMode(self: *Screen) Allocator.Error!void {
     if (self.caret_mode) return;
 
     const viewport_tl = self.pages.getTopLeft(.viewport);
+    const viewport_br = self.pages.getBottomRight(.viewport).?;
     self.pages.pinViewport(viewport_tl);
 
-    const tracked = try self.pages.trackPin(self.cursor.page_pin.*);
+    var caret = self.cursor.page_pin.*;
+    if (!caret.isBetween(viewport_tl, viewport_br)) {
+        caret = viewport_br;
+        caret.x = @min(self.cursor.page_pin.x, caret.node.cols() - 1);
+    }
+
+    const tracked = try self.pages.trackPin(caret);
     errdefer self.pages.untrackPin(tracked);
 
     const viewport_pin = try self.pages.trackPin(viewport_tl);
@@ -3297,6 +3306,32 @@ test "Screen: caret first non-blank" {
 
     s.moveCaret(.end_of_line);
     try testing.expectEqual(7, s.caret_pin.?.x);
+}
+
+test "Screen: caret starts at the bottom of a scrolled viewport" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(testing.io, alloc, .{
+        .cols = 10,
+        .rows = 5,
+        .max_scrollback_bytes = 1000,
+    });
+    defer s.deinit();
+
+    for (0..10) |_| try s.testWriteString("line\n");
+    s.cursorAbsolute(4, s.cursor.y);
+    s.scroll(.{ .delta_row = -2 });
+
+    const viewport_tl = s.pages.getTopLeft(.viewport);
+    var expected = s.pages.getBottomRight(.viewport).?;
+    expected.x = 4;
+
+    try s.enterCaretMode();
+    defer s.exitCaretMode();
+
+    try testing.expect(s.caret_pin.?.eql(expected));
+    try testing.expect(s.pages.getTopLeft(.viewport).eql(viewport_tl));
 }
 
 test "Screen: caret half-page movement" {
