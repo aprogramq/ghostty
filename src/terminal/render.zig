@@ -381,36 +381,33 @@ pub const RenderState = struct {
             return true;
         };
 
-        if (s.caret_line_selection_anchor == null) {
-            var y: usize = 0;
-            var page_it = viewport_pin.pageIterator(.right_down, null);
-            while (y < self.rows) {
-                const chunk = page_it.next() orelse break;
-                const node = chunk.node;
+        var y: usize = 0;
+        var page_it = viewport_pin.pageIterator(.right_down, null);
+        while (y < self.rows) {
+            const chunk = page_it.next() orelse break;
+            const node = chunk.node;
 
-                const take: usize = @min(
-                    @as(usize, chunk.end - chunk.start),
-                    self.rows - y,
-                );
+            const take: usize = @min(
+                @as(usize, chunk.end - chunk.start),
+                self.rows - y,
+            );
 
-                if (cp.node == node) {
-                    const cy = cp.y;
-                    if (cy >= chunk.start and cy < chunk.start + take) {
-                        const rac = cp.rowAndCell();
-                        self.caret = .{
-                            .y = @intCast(y + (cy - chunk.start)),
-                            .x = cp.x,
-                            .wide_tail = if (cp.x > 0)
-                                rac.cell.wide == .spacer_tail
-                            else
-                                false,
-                        };
-                        break;
-                    }
+            if (cp.node == node) {
+                const cy = cp.y;
+                if (cy >= chunk.start and cy < chunk.start + take) {
+                    const rac = cp.rowAndCell();
+                    self.caret = .{
+                        .y = @intCast(y + (cy - chunk.start)),
+                        .x = cp.x,
+                        .wide_tail = if (cp.x > 0)
+                            rac.cell.wide == .spacer_tail
+                        else
+                            false,
+                    };
+                    break;
                 }
-
-                y += take;
             }
+            y += take;
         }
 
         self.updateSelection(s, row_pins, row_sels, true, true);
