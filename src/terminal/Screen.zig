@@ -3214,16 +3214,8 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
     }
 
     if (self.caret_line_selection_anchor) |anchor| {
-        const anchor_line = self.selectLine(.{
-            .pin = anchor.*,
-            .whitespace = null,
-            .semantic_prompt_boundary = false,
-        }) orelse return;
-        const caret_line = self.selectLine(.{
-            .pin = pin.*,
-            .whitespace = null,
-            .semantic_prompt_boundary = false,
-        }) orelse return;
+        const anchor_line = selectVisualLine(anchor.*);
+        const caret_line = selectVisualLine(pin.*);
         const sel = &(self.selection orelse return);
 
         if (pin.before(anchor.*)) {
@@ -3245,15 +3237,22 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
     }
 }
 
+/// Return a selection covering only the visual row containing pin.
+fn selectVisualLine(pin: Pin) Selection {
+    var start = pin;
+    start.x = 0;
+
+    var end = pin;
+    end.x = pin.node.cols() - 1;
+
+    return .init(start, end, false);
+}
+
 /// Start a line-wise selection at the caret. While active, all movement keeps
-/// the selection aligned to complete logical line boundaries.
+/// the selection aligned to complete visual rows, without following soft wraps.
 pub fn selectCaretLine(self: *Screen) Allocator.Error!bool {
     const caret = self.caret_pin orelse return false;
-    const sel = self.selectLine(.{
-        .pin = caret.*,
-        .whitespace = null,
-        .semantic_prompt_boundary = false,
-    }) orelse return false;
+    const sel = selectVisualLine(caret.*);
 
     self.clearSelection();
     const anchor = try self.pages.trackPin(caret.*);
