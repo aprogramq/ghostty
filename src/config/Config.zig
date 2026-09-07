@@ -6796,9 +6796,6 @@ pub const Keybinds = struct {
             // Exit
             try t.put(alloc, .{ .key = .{ .physical = .escape } }, .exit_caret_mode);
             try t.put(alloc, .{ .key = .{ .unicode = 'q' } }, .exit_caret_mode);
-
-            // Swallow all unbound keys so they don't reach the terminal.
-            t.parseAndPut(alloc, "catch_all=ignore") catch unreachable;
         }
 
         // Tabs common to all platforms
