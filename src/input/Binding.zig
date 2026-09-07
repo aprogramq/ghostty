@@ -500,6 +500,7 @@ pub const Action = union(enum) {
     ///     Adjust the selection to the top-left or the bottom-right corner
     ///     of the screen respectively.
     ///
+    ///   - `beginning_of_line`, `end_of_line`
     ///
     ///     Adjust the selection to the beginning or the end of the line
     ///     respectively.
@@ -1078,6 +1079,7 @@ pub const Action = union(enum) {
         page_down,
         home,
         end,
+        beginning_of_line,
         end_of_line,
     };
 
