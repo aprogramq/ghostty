@@ -181,8 +181,6 @@ search: ?Search = null,
 /// Used to rate limit BEL handling.
 last_bell_time: ?std.Io.Timestamp = null,
 
-caret_mode_ever_entered: bool = false,
-
 /// The effect of an input event. This can be used by callers to take
 /// the appropriate action after an input event. For example, key
 /// input can be forwarded to the OS for further processing if it
@@ -283,6 +281,10 @@ pub const Keyboard = struct {
         set: *const input.Binding.Set,
         once: bool,
     }) = .empty,
+
+    /// True while caret mode owns keyboard input. This is maintained on the
+    /// surface thread so key events can check it without locking terminal state.
+    caret_mode: bool = false,
 
     /// The last handled binding. This is used to prevent encoding release
     /// events for handled bindings. We only need to keep track of one because
@@ -2717,12 +2719,10 @@ pub fn keyCallback(
         if (self.io.terminal.modes.get(.disable_keyboard)) return .consumed;
     }
 
-    // FIX: its required additional field, i dont like this
-    if (self.caret_mode_ever_entered) {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
-        if (self.io.terminal.screens.active.caret_mode) return .consumed;
-    }
+    // Caret mode owns all keyboard input, including release events and
+    // modifier-only events that don't match its key table.
+    if (self.keyboard.caret_mode) return .consumed;
+
     // If this input event has text, then we hide the mouse if configured.
     // We only do this on pressed events to avoid hiding the mouse when we
     // change focus due to a keybinding (i.e. switching tabs).
@@ -5681,7 +5681,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (screen.caret_mode) return false;
 
             try screen.enterCaretMode();
-            self.caret_mode_ever_entered = true;
+            self.keyboard.caret_mode = true;
 
             // Push the "caret" key table so caret bindings become active.
             if (self.config.keybind.tables.getPtr("caret")) |set| {
@@ -5712,6 +5712,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (!screen.caret_mode) return false;
 
             screen.exitCaretMode();
+            self.keyboard.caret_mode = false;
 
             // Pop the "caret" key table.
             switch (self.keyboard.table_stack.items.len) {
