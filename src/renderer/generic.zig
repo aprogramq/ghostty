@@ -234,8 +234,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The render state we update per loop.
         terminal_state: terminal.RenderState = .empty,
 
-        /// True after we've captured a render-state snapshot for caret mode.
-        terminal_state_frozen_caret: bool = false,
+        /// True after the terminal snapshot for caret mode has been captured.
+        terminal_frozen_state: bool = false,
 
         /// The number of frames since the last terminal state reset.
         /// We reset the terminal state after ~100,000 frames (about 10 to
@@ -1292,7 +1292,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.terminal_state.deinit(self.alloc);
                 self.terminal_state = .empty;
                 self.terminal_state_frame_count = 0;
-                self.terminal_state_frozen_caret = false;
+                self.terminal_frozen_state = false;
             }
             self.terminal_state_frame_count += 1;
 
@@ -1338,8 +1338,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update this BEFORE we update our render state so we can
                 // draw the new scrolled data immediately.
                 if (self.config.scroll_to_bottom_on_output) scroll: {
-                    if (state.terminal.screens.active.caret_mode) break :scroll;
-
                     const br = state.terminal.screens.active.pages.getBottomRight(.screen) orelse break :scroll;
 
                     // If the pin hasn't changed, then don't scroll.
@@ -1355,27 +1353,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
 
                 const screen = state.terminal.screens.active;
-                const frozen_caret = screen.caret_mode and
-                    self.terminal_state_frozen_caret and
-                    self.terminal_state.rows == screen.pages.rows and
-                    self.terminal_state.cols == screen.pages.cols;
+                const frozen_state = screen.caret_mode and
+                    self.terminal_frozen_state; 
 
-                const caret_only = frozen_caret and
+                const caret_only = frozen_state and
                     self.terminal_state.updateCaretOnly(state.terminal);
 
+                // Begin the update of our terminal state. Work that
+                // doesn't require terminal access (e.g. style
+                // denormalization) is deferred to the endUpdate call
+                // outside of this critical section, keeping our lock
+                // hold time as short as possible.
                 if (!caret_only) {
-                    // Begin the update of our terminal state. Work that
-                    // doesn't require terminal access (e.g. style
-                    // denormalization) is deferred to the endUpdate call
-                    // outside of this critical section, keeping our lock
-                    // hold time as short as possible.
                     try self.terminal_state.beginUpdate(
                         self.alloc,
                         state.terminal,
                     );
                 }
 
-                self.terminal_state_frozen_caret = screen.caret_mode;
+                //INFO: need research it
+                self.terminal_frozen_state = screen.caret_mode;
 
                 // If our terminal state is dirty at all we need to redo
                 // the viewport search.
@@ -2816,7 +2813,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Draw the keyboard-navigation caret as a block cursor. The block
             // is placed before the row glyphs, and cursor_pos makes the shader
-            // recolor the glyph inside it just like the regular block cursor.
             caret: {
                 const caret_vp = state.caret orelse break :caret;
                 const caret_cell = state.row_data.items(.cells)[caret_vp.y].get(caret_vp.x);

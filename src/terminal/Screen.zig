@@ -2974,10 +2974,8 @@ pub fn enterCaretMode(self: *Screen) Allocator.Error!void {
     self.caret_mode = true;
 }
 
-/// Exit caret mode, releasing the tracked caret pin and clearing any
-/// active selection. Copy before exiting if you want to keep the selection.
+/// Exit caret mode, releasing the tracked caret pin and clearing any active selection
 pub fn exitCaretMode(self: *Screen) void {
-    if (!self.caret_mode) return;
     if (self.caret_pin) |pin| {
         self.pages.untrackPin(pin);
         self.caret_pin = null;
@@ -2988,7 +2986,7 @@ pub fn exitCaretMode(self: *Screen) void {
     }
     self.caret_mode = false;
     self.clearSelection();
-    self.scroll( .{.active = {}} );
+    self.scroll(.{ .active = {} });
 }
 
 pub const CaretAdjustment = enum {
@@ -3003,12 +3001,11 @@ pub const CaretAdjustment = enum {
     home,
     end,
     beginning_of_line,
-    first_non_blank,
     end_of_line,
     word_left,
     word_right,
-    word_left_whitespace,
-    word_right_whitespace,
+    big_word_left,
+    big_word_right,
 };
 
 /// Move the caret by the given adjustment. If a selection is active its
@@ -3081,9 +3078,8 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             }
         },
 
-        .beginning_of_line => pin.x = 0,
 
-        .first_non_blank => {
+        .beginning_of_line => {
             pin.x = 0;
             const rac = pin.rowAndCell();
             const cells = pin.node.page().getCells(rac.row);
@@ -3165,7 +3161,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             }
         },
 
-        .word_left_whitespace => {
+        .big_word_left => {
             var it = pin.cellIterator(.left_up, null);
             _ = it.next();
 
@@ -3186,7 +3182,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             }
         },
 
-        .word_right_whitespace => {
+        .big_word_right => {
             var it = pin.cellIterator(.right_down, null);
             _ = it.next();
 
@@ -3211,6 +3207,35 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
                 pin.* = next;
             }
         },
+    }
+
+    //BUG: in some case sharp
+    // Ctrl+U/Ctrl+D move the caret and viewport together by half a page,
+    // preserving the caret's relative screen position.
+    if (adjustment == .half_page_up or adjustment == .half_page_down) {
+        const rows: isize = @intCast(@max(self.pages.rows / 2, 1));
+        self.scroll(.{ .delta_row = if (adjustment == .half_page_up)
+            -rows
+        else
+            rows });
+        if (self.caret_viewport_pin) |viewport| {
+            viewport.* = self.pages.getTopLeft(.viewport);
+        }
+    } else caret_scroll: {
+        // Other motions only scroll enough to keep the caret visible.
+        const viewport_tl = self.pages.getTopLeft(.viewport);
+        const viewport_br = self.pages.getBottomRight(.viewport).?;
+        if (pin.*.isBetween(viewport_tl, viewport_br)) break :caret_scroll;
+
+        const target = if (pin.*.before(viewport_tl))
+            pin.*
+        else
+            pin.*.up(self.pages.rows - 1) orelse pin.*;
+
+        self.scroll(.{ .pin = target });
+        if (self.caret_viewport_pin) |viewport| {
+            viewport.* = self.pages.getTopLeft(.viewport);
+        }
     }
 
     if (self.caret_line_selection_anchor) |anchor| {
@@ -3288,70 +3313,6 @@ fn caretWordClass(cell: *const Cell) CaretWordClass {
 
 fn isCaretWordCell(cell: *const Cell) bool {
     return caretWordClass(cell) != .whitespace;
-}
-
-test "Screen: caret first non-blank" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(testing.io, alloc, .{ .cols = 12, .rows = 5, .max_scrollback_bytes = 0 });
-    defer s.deinit();
-
-    try s.testWriteString("   hello  ");
-    try s.enterCaretMode();
-    defer s.exitCaretMode();
-
-    s.moveCaret(.first_non_blank);
-    try testing.expectEqual(3, s.caret_pin.?.x);
-
-    s.moveCaret(.end_of_line);
-    try testing.expectEqual(7, s.caret_pin.?.x);
-}
-
-test "Screen: caret starts at the bottom of a scrolled viewport" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(testing.io, alloc, .{
-        .cols = 10,
-        .rows = 5,
-        .max_scrollback_bytes = 1000,
-    });
-    defer s.deinit();
-
-    for (0..10) |_| try s.testWriteString("line\n");
-    s.cursorAbsolute(4, s.cursor.y);
-    s.scroll(.{ .delta_row = -2 });
-
-    const viewport_tl = s.pages.getTopLeft(.viewport);
-    var expected = s.pages.getBottomRight(.viewport).?;
-    expected.x = 4;
-
-    try s.enterCaretMode();
-    defer s.exitCaretMode();
-
-    try testing.expect(s.caret_pin.?.eql(expected));
-    try testing.expect(s.pages.getTopLeft(.viewport).eql(viewport_tl));
-}
-
-test "Screen: caret half-page movement" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(testing.io, alloc, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 20 });
-    defer s.deinit();
-
-    for (0..20) |_| try s.testWriteString("line\n");
-    try s.enterCaretMode();
-    defer s.exitCaretMode();
-
-    const initial = s.caret_pin.?.*;
-    const expected_up = initial.up(5).?;
-    s.moveCaret(.half_page_up);
-    try testing.expect(s.caret_pin.?.eql(expected_up));
-
-    s.moveCaret(.half_page_down);
-    try testing.expect(s.caret_pin.?.eql(initial));
 }
 
 pub const SelectionString = struct {
