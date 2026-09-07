@@ -405,6 +405,7 @@ pub const Adjustment = lib.Enum(lib.target, &.{
     "end",
     "page_up",
     "page_down",
+    "beginning_of_line",
     "end_of_line",
     "word_left",
     "word_right",
@@ -426,7 +427,7 @@ pub fn adjust(
         .up => if (end_pin.up(1)) |new_end| {
             end_pin.* = new_end;
         } else {
-            end_pin.x = 0;
+            self.adjust(s, .beginning_of_line);
         },
 
         .down => {
@@ -504,6 +505,8 @@ pub fn adjust(
                 }
             }
         },
+
+        .beginning_of_line => end_pin.x = 0,
 
         .end_of_line => end_pin.x = end_pin.node.cols() - 1,
 
@@ -902,6 +905,76 @@ test "Selection: adjust end with not full screen" {
         try testing.expectEqual(point.Point{ .screen = .{
             .x = 9,
             .y = 2,
+        } }, s.pages.pointFromPin(.screen, sel.end()).?);
+    }
+}
+
+test "Selection: adjust beginning of line" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 8, .rows = 10, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+    try s.testWriteString("A12 B34\nC12 D34");
+
+    // Not at beginning of the line
+    {
+        var sel = Selection.init(
+            s.pages.pin(.{ .screen = .{ .x = 5, .y = 1 } }).?,
+            s.pages.pin(.{ .screen = .{ .x = 5, .y = 1 } }).?,
+            false,
+        );
+        defer sel.deinit(&s);
+        sel.adjust(&s, .beginning_of_line);
+
+        // Start line
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 5,
+            .y = 1,
+        } }, s.pages.pointFromPin(.screen, sel.start()).?);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 1,
+        } }, s.pages.pointFromPin(.screen, sel.end()).?);
+    }
+
+    // Already at beginning of the line
+    {
+        var sel = Selection.init(
+            s.pages.pin(.{ .screen = .{ .x = 5, .y = 1 } }).?,
+            s.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?,
+            false,
+        );
+        defer sel.deinit(&s);
+        sel.adjust(&s, .beginning_of_line);
+
+        // Start line
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 5,
+            .y = 1,
+        } }, s.pages.pointFromPin(.screen, sel.start()).?);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 1,
+        } }, s.pages.pointFromPin(.screen, sel.end()).?);
+    }
+
+    // End pin moves to start pin
+    {
+        var sel = Selection.init(
+            s.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?,
+            s.pages.pin(.{ .screen = .{ .x = 5, .y = 1 } }).?,
+            false,
+        );
+        defer sel.deinit(&s);
+        sel.adjust(&s, .beginning_of_line);
+
+        // Start line
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 1,
+        } }, s.pages.pointFromPin(.screen, sel.start()).?);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 1,
         } }, s.pages.pointFromPin(.screen, sel.end()).?);
     }
 }
