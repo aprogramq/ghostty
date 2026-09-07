@@ -651,7 +651,7 @@ pub const RenderState = struct {
             const page_dirty = p.dirty;
             if (page_dirty) p.dirty = false;
             // Find the caret position within the viewport.
-            if (s.caret_mode and s.caret_line_selection_anchor == null) {
+            if (s.caret_mode) {
                 if (self.caret == null) {
                     if (s.caret_pin) |cp| {
                         if (cp.node == node) {
