@@ -5644,7 +5644,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .page_down => .page_down,
                 .home => .home,
                 .end => .end,
-                .beginning_of_line => .beginning_of_line,
                 .end_of_line => .end_of_line,
             });
 
@@ -5750,41 +5749,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .home => .home,
                 .end => .end,
                 .beginning_of_line => .beginning_of_line,
-                .first_non_blank => .first_non_blank,
                 .end_of_line => .end_of_line,
                 .word_left => .word_left,
                 .word_right => .word_right,
-                .word_left_whitespace => .word_left_whitespace,
-                .word_right_whitespace => .word_right_whitespace,
+                .big_word_left => .big_word_left,
+                .big_word_right => .big_word_right,
             });
 
-            // Ctrl+U/Ctrl+D move the caret and viewport together by half a
-            // page, preserving the caret's relative screen position.
-            if (direction == .half_page_up or direction == .half_page_down) {
-                const rows: isize = @intCast(@max(screen.pages.rows / 2, 1));
-                screen.scroll(.{ .delta_row = if (direction == .half_page_up)
-                    -rows
-                else
-                    rows });
-                if (screen.caret_viewport_pin) |vp| {
-                    vp.* = screen.pages.getTopLeft(.viewport);
-                }
-            } else if (screen.caret_pin) |cp| caret_scroll: {
-                // Other motions only scroll enough to keep the caret visible.
-                const viewport_tl = screen.pages.getTopLeft(.viewport);
-                const viewport_br = screen.pages.getBottomRight(.viewport).?;
-                if (cp.*.isBetween(viewport_tl, viewport_br)) break :caret_scroll;
-
-                const target = if (cp.*.before(viewport_tl))
-                    cp.*
-                else
-                    cp.*.up(screen.pages.rows - 1) orelse cp.*;
-
-                screen.scroll(.{ .pin = target });
-                if (screen.caret_viewport_pin) |vp| {
-                    vp.* = screen.pages.getTopLeft(.viewport);
-                }
-            }
 
             try self.queueRender();
         },

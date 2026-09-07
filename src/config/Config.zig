@@ -6762,12 +6762,10 @@ pub const Keybinds = struct {
             try t.put(alloc, .{ .key = .{ .unicode = 'l' } }, .{ .move_caret = .right });
             try t.put(alloc, .{ .key = .{ .unicode = 'b' } }, .{ .move_caret = .word_left });
             try t.put(alloc, .{ .key = .{ .unicode = 'w' } }, .{ .move_caret = .word_right });
-            try t.put(alloc, .{ .key = .{ .unicode = 'B' }, .mods = .{ .shift = true } }, .{ .move_caret = .word_left_whitespace });
-            try t.put(alloc, .{ .key = .{ .unicode = 'W' }, .mods = .{ .shift = true } }, .{ .move_caret = .word_right_whitespace });
+            try t.put(alloc, .{ .key = .{ .unicode = 'B' }, .mods = .{ .shift = true } }, .{ .move_caret = .big_word_left });
+            try t.put(alloc, .{ .key = .{ .unicode = 'W' }, .mods = .{ .shift = true } }, .{ .move_caret = .big_word_right });
 
             // Page movement
-            try t.put(alloc, .{ .key = .{ .physical = .page_up } }, .{ .move_caret = .page_up });
-            try t.put(alloc, .{ .key = .{ .physical = .page_down } }, .{ .move_caret = .page_down });
             try t.put(alloc, .{ .key = .{ .unicode = 'd' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .half_page_down });
             try t.put(alloc, .{ .key = .{ .unicode = 'u' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .half_page_up });
             try t.put(alloc, .{ .key = .{ .unicode = 'f' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .page_down });
@@ -6776,15 +6774,9 @@ pub const Keybinds = struct {
             // Jump to top/bottom
             t.parseAndPut(alloc, "g>g=move_caret:home") catch unreachable;
             try t.put(alloc, .{ .key = .{ .unicode = 'G' }, .mods = .{ .shift = true } }, .{ .move_caret = .end });
-            try t.put(alloc, .{ .key = .{ .unicode = '0' } }, .{ .move_caret = .beginning_of_line });
-            try t.put(alloc, .{ .key = .{ .unicode = '^' }, .mods = .{ .shift = true } }, .{ .move_caret = .first_non_blank });
+            try t.put(alloc, .{ .key = .{ .unicode = '^' }, .mods = .{ .shift = true } }, .{ .move_caret = .beginning_of_line });
             try t.put(alloc, .{ .key = .{ .unicode = '$' }, .mods = .{ .shift = true } }, .{ .move_caret = .end_of_line });
 
-            // Search
-            try t.put(alloc, .{ .key = .{ .unicode = '/' } }, .start_search);
-            //Not working right now
-            // try t.put(alloc, .{ .key = .{ .unicode = 'n' } }, .{ .navigate_search = .next });
-            // try t.put(alloc, .{ .key = .{ .unicode = 'N' }, .mods = .{ .shift = true } }, .{ .navigate_search = .previous });
 
             // Selection
             try t.put(alloc, .{ .key = .{ .unicode = 'v' } }, .toggle_caret_selection);

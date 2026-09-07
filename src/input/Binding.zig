@@ -500,7 +500,6 @@ pub const Action = union(enum) {
     ///     Adjust the selection to the top-left or the bottom-right corner
     ///     of the screen respectively.
     ///
-    ///   - `beginning_of_line`, `end_of_line`
     ///
     ///     Adjust the selection to the beginning or the end of the line
     ///     respectively.
@@ -521,7 +520,7 @@ pub const Action = union(enum) {
     /// Valid arguments are:
     /// `left`, `right`, `up`, `down`, `page_up`, `page_down`,
     /// `half_page_up`, `half_page_down`, `home`, `end`,
-    /// `beginning_of_line`, `first_non_blank`, `end_of_line`, `word_left`,
+    /// `beginning_of_line`, `end_of_line`, `word_left`,
     /// `word_right`, `word_left_whitespace`, `word_right_whitespace`.
     move_caret: MoveCaret,
 
@@ -1079,7 +1078,6 @@ pub const Action = union(enum) {
         page_down,
         home,
         end,
-        beginning_of_line,
         end_of_line,
     };
 
@@ -1095,12 +1093,11 @@ pub const Action = union(enum) {
         home,
         end,
         beginning_of_line,
-        first_non_blank,
         end_of_line,
         word_left,
         word_right,
-        word_left_whitespace,
-        word_right_whitespace,
+        big_word_left,
+        big_word_right,
     };
 
     pub const SplitDirection = enum {
