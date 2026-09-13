@@ -510,29 +510,23 @@ pub const Action = union(enum) {
     /// Enter caret (keyboard navigation) mode. The caret is placed at the
     /// terminal cursor when it is visible, or at the bottom of the current
     /// viewport at the cursor's column otherwise. Also pushes the "caret" key
-    /// table. No-op if caret mode is already active.
+    /// table
     enter_caret_mode,
 
     /// Exit caret mode. Also pops the "caret" key table.
     exit_caret_mode,
 
-    /// Move the caret in caret mode. No-op if caret mode is not active.
-    ///
-    /// Valid arguments are:
-    /// `left`, `right`, `up`, `down`, `page_up`, `page_down`,
-    /// `half_page_up`, `half_page_down`, `home`, `end`,
-    /// `beginning_of_line`, `end_of_line`, `word_left`,
-    /// `word_right`, `word_left_whitespace`, `word_right_whitespace`.
+    /// Move the caret in caret mode.
     move_caret: MoveCaret,
 
     /// Toggle a selection anchored at the caret position. If no selection
     /// exists, one is created at the current caret. If a selection exists,
-    /// it is cleared. No-op if caret mode is not active.
+    /// it is cleared.
     toggle_caret_selection,
 
     /// Toggle a rectangular selection anchored at the caret position. An
     /// existing non-rectangular selection is converted while preserving its
-    /// anchor. No-op if caret mode is not active.
+    /// anchor.
     toggle_caret_rectangle_selection,
 
     /// Select the entire line under the caret when in caret mode.
