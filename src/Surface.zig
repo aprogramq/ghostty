@@ -5685,7 +5685,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             // Push the "caret" key table so caret bindings become active.
             if (self.config.keybind.tables.getPtr("caret")) |set| {
-                //WARNING: Strange construction i understand this later
                 if (self.keyboard.table_stack.items.len < max_active_key_tables) {
                     try self.keyboard.table_stack.append(self.alloc, .{
                         .set = set,
@@ -5769,7 +5768,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (!screen.caret_mode) return false;
 
             if (screen.selection != null) {
-                // Clear the existing selection.
                 screen.clearSelection();
             } else if (screen.caret_pin) |cp| {
                 // Anchor a new selection at the caret position.
@@ -5789,10 +5787,10 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             if (screen.selection) |*sel| {
                 if (sel.rectangle) {
-                    // Repeating Ctrl+V leaves visual selection mode.
                     screen.clearSelection();
                 } else {
                     // Preserve the existing anchor when switching from a
+                    try screen.select(sel.*);
                     // character selection to a rectangular selection.
                     sel.rectangle = true;
                     screen.dirty.selection = true;

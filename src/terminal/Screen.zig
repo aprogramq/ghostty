@@ -67,7 +67,7 @@ caret_mode: bool = false,
 caret_viewport_pin: ?*Pin = null,
 
 /// Tracked position of the caret for keyboard navigation. Always a tracked
-/// pin so it stays valid as the buffer scrolls. Null when caret_mode is false.
+/// pin so it stays valid as the buffer scrolls.
 caret_pin: ?*Pin = null,
 
 /// Anchor for line-wise caret selection. When set, movement can only extend
