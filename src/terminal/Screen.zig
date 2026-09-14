@@ -61,7 +61,7 @@ saved_cursor: ?SavedCursor = null,
 /// automatically setup tracking.
 selection: ?Selection = null,
 
-/// True when caret (keyboard navigation) mode is active.
+/// Caret mode for keyboard navigation.
 caret_mode: bool = false,
 
 caret_viewport_pin: ?*Pin = null,
@@ -73,6 +73,7 @@ caret_pin: ?*Pin = null,
 /// Original caret position, independent of the displayed selection bounds.
 /// In particular, line selection must not lose the original column or direction.
 caret_selection_anchor: ?*Pin = null,
+
 caret_selection_style: CaretSelectionStyle = .character,
 
 /// The charset state
@@ -109,7 +110,6 @@ pub const Dirty = packed struct {
     /// When an OSC8 hyperlink is hovered, we set the full screen as dirty
     /// because links can span multiple lines.
     hyperlink_hover: bool = false,
-
 };
 
 pub const SemanticPrompt = struct {
@@ -3079,13 +3079,12 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             }
         },
 
-
         .beginning_of_line => {
             pin.x = 0;
             const rac = pin.rowAndCell();
             const cells = pin.node.page().getCells(rac.row);
             for (cells, 0..) |*cell, x| {
-                if (isCaretWordCell(cell)) {
+                if (isCaretNonWhitespace(cell)) {
                     pin.x = @intCast(x);
                     break;
                 }
@@ -3099,7 +3098,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             var x = cells.len;
             while (x > 0) {
                 x -= 1;
-                if (isCaretWordCell(&cells[x])) {
+                if (isCaretNonWhitespace(&cells[x])) {
                     pin.x = @intCast(x);
                     break;
                 }
@@ -3168,7 +3167,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
 
             var seen_text = false;
             while (it.next()) |next| {
-                if (isCaretWordCell(next.rowAndCell().cell)) {
+                if (isCaretNonWhitespace(next.rowAndCell().cell)) {
                     pin.* = next;
                     seen_text = true;
                     break;
@@ -3177,7 +3176,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
 
             if (seen_text) {
                 while (it.next()) |next| {
-                    if (!isCaretWordCell(next.rowAndCell().cell)) break;
+                    if (!isCaretNonWhitespace(next.rowAndCell().cell)) break;
                     pin.* = next;
                 }
             }
@@ -3192,7 +3191,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             while (it.next()) |next| {
                 if (next_line == null and next.x == 0) next_line = next;
 
-                if (isCaretWordCell(next.rowAndCell().cell)) {
+                if (isCaretNonWhitespace(next.rowAndCell().cell)) {
                     pin.* = next;
                     seen_text = true;
                     break;
@@ -3201,7 +3200,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
 
             if (seen_text) {
                 while (it.next()) |next| {
-                    if (!isCaretWordCell(next.rowAndCell().cell)) break;
+                    if (!isCaretNonWhitespace(next.rowAndCell().cell)) break;
                     pin.* = next;
                 }
             } else if (next_line) |next| {
@@ -3210,8 +3209,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
         },
     }
 
-    //BUG: in some case sharp
-    // Ctrl+U/Ctrl+D move the caret and viewport together by half a page,
+    // Move the caret and viewport together by half a page,
     // preserving the caret's relative screen position.
     if (adjustment == .half_page_up or adjustment == .half_page_down) {
         const rows: isize = @intCast(@max(self.pages.rows / 2, 1));
@@ -3239,6 +3237,7 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
         }
     }
 
+    // If a caret selection is active, update its bounds to follow the caret.
     if (self.caret_selection_anchor) |anchor| {
         const bounds = caretSelectionBounds(anchor.*, pin.*, self.caret_selection_style);
         const sel = &(self.selection orelse return);
@@ -3338,7 +3337,7 @@ fn caretWordClass(cell: *const Cell) CaretWordClass {
     return .punctuation;
 }
 
-fn isCaretWordCell(cell: *const Cell) bool {
+fn isCaretNonWhitespace(cell: *const Cell) bool {
     return caretWordClass(cell) != .whitespace;
 }
 

@@ -5756,7 +5756,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .big_word_right => .big_word_right,
             });
 
-
             try self.queueRender();
         },
 

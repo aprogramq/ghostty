@@ -1481,7 +1481,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Outside the critical area, complete the update we began
             // within it. This must be done before anything reads the
-            // render state (e.g. rebuildCells).
+            // render state.
             if (critical.terminal_state_began) {
                 self.terminal_state.endUpdate();
             }
@@ -2811,8 +2811,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            // Draw the keyboard-navigation caret as a block cursor. The block
-            // is placed before the row glyphs, and cursor_pos makes the shader
+            // Draw the keyboard-navigation caret as a block cursor.
             caret: {
                 const caret_vp = state.caret orelse break :caret;
                 const caret_cell = state.row_data.items(.cells)[caret_vp.y].get(caret_vp.x);
@@ -2958,7 +2957,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .cells = cells_slice,
                 .selection = if (selection) |s| s else null,
 
-                // Break shaping at the visible caret or terminal cursor so
+                // Break shaping at the visible terminal cursor or caret so
                 // the glyph under a block cursor can be recolored separately.
                 .cursor_x = cursor_x: {
                     const vp = state.caret orelse
