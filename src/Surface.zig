@@ -5767,13 +5767,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (!screen.caret_mode) return false;
 
-            if (screen.selection != null) {
-                screen.clearSelection();
-            } else if (screen.caret_pin) |cp| {
-                // Anchor a new selection at the caret position.
-                const sel = terminal.Selection.init(cp.*, cp.*, false);
-                try screen.select(sel);
-            }
+            _ = try screen.setCaretSelectionStyle(.character, true);
 
             try self.queueRender();
         },
@@ -5785,20 +5779,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (!screen.caret_mode) return false;
 
-            if (screen.selection) |*sel| {
-                if (sel.rectangle) {
-                    screen.clearSelection();
-                } else {
-                    // Preserve the existing anchor when switching from a
-                    try screen.select(sel.*);
-                    // character selection to a rectangular selection.
-                    sel.rectangle = true;
-                    screen.dirty.selection = true;
-                }
-            } else if (screen.caret_pin) |cp| {
-                const sel = terminal.Selection.init(cp.*, cp.*, true);
-                try screen.select(sel);
-            }
+            _ = try screen.setCaretSelectionStyle(.rectangle, true);
 
             try self.queueRender();
         },

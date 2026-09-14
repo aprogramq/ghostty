@@ -70,9 +70,10 @@ caret_viewport_pin: ?*Pin = null,
 /// pin so it stays valid as the buffer scrolls.
 caret_pin: ?*Pin = null,
 
-/// Anchor for line-wise caret selection. When set, movement can only extend
-/// the selection by complete logical lines.
-caret_line_selection_anchor: ?*Pin = null,
+/// Original caret position, independent of the displayed selection bounds.
+/// In particular, line selection must not lose the original column or direction.
+caret_selection_anchor: ?*Pin = null,
+caret_selection_style: CaretSelectionStyle = .character,
 
 /// The charset state
 charset: CharsetState = .{},
@@ -2891,8 +2892,6 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
 /// managing memory for you, it also performs safety checks that the selection
 /// is always tracked.
 pub fn select(self: *Screen, sel_: ?Selection) Allocator.Error!void {
-    self.clearCaretLineSelection();
-
     const sel = sel_ orelse {
         self.clearSelection();
         return;
@@ -2901,6 +2900,7 @@ pub fn select(self: *Screen, sel_: ?Selection) Allocator.Error!void {
     // If this selection is untracked then we track it.
     const tracked_sel = if (sel.tracked()) sel else try sel.track(self);
     errdefer if (!sel.tracked()) tracked_sel.deinit(self);
+    self.clearCaretSelection();
 
     // Untrack prior selection pins that aren't also owned by the replacement.
     // A caller may pass our current tracked selection back to us by value, so
@@ -2930,7 +2930,7 @@ pub fn select(self: *Screen, sel_: ?Selection) Allocator.Error!void {
 
 /// Same as select(null) but can't fail.
 pub fn clearSelection(self: *Screen) void {
-    self.clearCaretLineSelection();
+    self.clearCaretSelection();
 
     if (self.selection) |*sel| {
         sel.deinit(self);
@@ -2939,11 +2939,12 @@ pub fn clearSelection(self: *Screen) void {
     self.selection = null;
 }
 
-fn clearCaretLineSelection(self: *Screen) void {
-    if (self.caret_line_selection_anchor) |pin| {
+fn clearCaretSelection(self: *Screen) void {
+    if (self.caret_selection_anchor) |pin| {
         self.pages.untrackPin(pin);
-        self.caret_line_selection_anchor = null;
+        self.caret_selection_anchor = null;
     }
+    self.caret_selection_style = .character;
 }
 
 /// Enter caret mode. The caret is initialized at the current terminal
@@ -3238,19 +3239,12 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
         }
     }
 
-    if (self.caret_line_selection_anchor) |anchor| {
-        const anchor_line = selectVisualLine(anchor.*);
-        const caret_line = selectVisualLine(pin.*);
+    if (self.caret_selection_anchor) |anchor| {
+        const bounds = caretSelectionBounds(anchor.*, pin.*, self.caret_selection_style);
         const sel = &(self.selection orelse return);
-
-        if (pin.before(anchor.*)) {
-            sel.startPtr().* = caret_line.start();
-            sel.endPtr().* = anchor_line.end();
-        } else {
-            sel.startPtr().* = anchor_line.start();
-            sel.endPtr().* = caret_line.end();
-        }
-        sel.rectangle = false;
+        sel.startPtr().* = bounds.start();
+        sel.endPtr().* = bounds.end();
+        sel.rectangle = bounds.rectangle;
         self.dirty.selection = true;
         return;
     }
@@ -3273,18 +3267,55 @@ fn selectVisualLine(pin: Pin) Selection {
     return .init(start, end, false);
 }
 
-/// Start a line-wise selection at the caret. While active, all movement keeps
-/// the selection aligned to complete visual rows, without following soft wraps.
-pub fn selectCaretLine(self: *Screen) Allocator.Error!bool {
-    const caret = self.caret_pin orelse return false;
-    const sel = selectVisualLine(caret.*);
+pub const CaretSelectionStyle = enum { character, line, rectangle };
 
-    self.clearSelection();
-    const anchor = try self.pages.trackPin(caret.*);
+fn caretSelectionBounds(anchor: Pin, caret: Pin, selection_style: CaretSelectionStyle) Selection {
+    if (selection_style != .line) return .init(anchor, caret, selection_style == .rectangle);
+
+    const anchor_line = selectVisualLine(anchor);
+    const caret_line = selectVisualLine(caret);
+    return if (caret.before(anchor))
+        .init(caret_line.start(), anchor_line.end(), false)
+    else
+        .init(anchor_line.start(), caret_line.end(), false);
+}
+
+/// Change selection style without moving its original anchor or the caret.
+/// Selecting an already active toggle style clears the selection.
+pub fn setCaretSelectionStyle(
+    self: *Screen,
+    selection_style: CaretSelectionStyle,
+    toggle: bool,
+) Allocator.Error!bool {
+    const caret = self.caret_pin orelse return false;
+    if (self.selection) |sel| {
+        const current_style: CaretSelectionStyle = if (self.caret_selection_anchor != null)
+            self.caret_selection_style
+        else if (sel.rectangle) .rectangle else .character;
+        if (toggle and current_style == selection_style) {
+            self.clearSelection();
+            return true;
+        }
+    }
+
+    const origin = if (self.caret_selection_anchor) |anchor|
+        anchor.*
+    else if (self.selection) |sel|
+        sel.start()
+    else
+        caret.*;
+    const bounds = caretSelectionBounds(origin, caret.*, selection_style);
+    const anchor = try self.pages.trackPin(origin);
     errdefer self.pages.untrackPin(anchor);
-    try self.select(sel);
-    self.caret_line_selection_anchor = anchor;
+    try self.select(bounds);
+    self.caret_selection_anchor = anchor;
+    self.caret_selection_style = selection_style;
     return true;
+}
+
+/// Select complete visual rows, without following soft wraps.
+pub fn selectCaretLine(self: *Screen) Allocator.Error!bool {
+    return self.setCaretSelectionStyle(.line, false);
 }
 
 const CaretWordClass = enum {
