@@ -3248,12 +3248,6 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
         self.dirty.selection = true;
         return;
     }
-
-    // If a selection is active, extend its end to follow the caret.
-    if (self.selection) |*sel| {
-        sel.endPtr().* = pin.*;
-        self.dirty.selection = true;
-    }
 }
 
 /// Return a selection covering only the visual row containing pin.
@@ -3288,11 +3282,13 @@ pub fn setCaretSelectionStyle(
     toggle: bool,
 ) Allocator.Error!bool {
     const caret = self.caret_pin orelse return false;
-    if (self.selection) |sel| {
-        const current_style: CaretSelectionStyle = if (self.caret_selection_anchor != null)
-            self.caret_selection_style
-        else if (sel.rectangle) .rectangle else .character;
-        if (toggle and current_style == selection_style) {
+
+    // A selection created outside caret mode must not become the anchor for a
+    // keyboard selection.
+    if (self.selection != null and self.caret_selection_anchor == null) {
+        self.clearSelection();
+    } else if (self.selection != null) {
+        if (toggle and self.caret_selection_style == selection_style) {
             self.clearSelection();
             return true;
         }
