@@ -826,6 +826,10 @@ pub fn deinit(self: *Surface) void {
     self.renderer.deinit();
     self.io_thread.deinit();
     self.mouse.selection_gesture.deinit(&self.io.terminal);
+    if (self.renderer_state.caret_screen) |screen| {
+        screen.deinit();
+        self.alloc.destroy(screen);
+    }
     self.io.deinit();
 
     if (self.inspector) |v| {
@@ -2289,6 +2293,7 @@ fn clipboardWrite(self: *const Surface, data: []const u8, loc: apprt.Clipboard) 
 
 fn copySelectionToClipboards(
     self: *Surface,
+    screen: *const terminal.Screen,
     sel: terminal.Selection,
     clipboards: []const apprt.Clipboard,
     format: input.Binding.Action.CopyToClipboard,
@@ -2316,7 +2321,7 @@ fn copySelectionToClipboards(
     var contents: std.ArrayList(apprt.ClipboardContent) = .initBuffer(&contents_buf);
     switch (format) {
         .plain => {
-            var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, opts);
+            var formatter: ScreenFormatter = .init(screen, opts);
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
             contents.appendAssumeCapacity(.{
@@ -2326,7 +2331,7 @@ fn copySelectionToClipboards(
         },
 
         .vt => {
-            var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, opts: {
+            var formatter: ScreenFormatter = .init(screen, opts: {
                 var copy = opts;
                 copy.emit = .vt;
                 break :opts copy;
@@ -2343,7 +2348,7 @@ fn copySelectionToClipboards(
         },
 
         .html => {
-            var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, opts: {
+            var formatter: ScreenFormatter = .init(screen, opts: {
                 var copy = opts;
                 copy.emit = .html;
                 break :opts copy;
@@ -2361,7 +2366,7 @@ fn copySelectionToClipboards(
 
         .mixed => {
             // First, generate plain text with codepoint mappings applied
-            var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, opts);
+            var formatter: ScreenFormatter = .init(screen, opts);
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
             contents.appendAssumeCapacity(.{
@@ -2371,7 +2376,7 @@ fn copySelectionToClipboards(
 
             assert(aw.written().len == 0);
             // Second, generate HTML without codepoint mappings
-            formatter = .init(self.io.terminal.screens.active, opts: {
+            formatter = .init(screen, opts: {
                 var copy = opts;
                 copy.emit = .html;
 
@@ -2449,6 +2454,7 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 
         // The selection clipboard is set if supported, otherwise nothing is copied.
         .primary => try self.copySelectionToClipboards(
+            self.io.terminal.screens.active,
             sel,
             &.{.selection},
             .mixed,
@@ -2456,6 +2462,7 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 
         // Only the standard clipboard is set.
         .clipboard => try self.copySelectionToClipboards(
+            self.io.terminal.screens.active,
             sel,
             &.{.standard},
             .mixed,
@@ -2463,6 +2470,7 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 
         // Both standard and selection clipboards are set.
         .both => try self.copySelectionToClipboards(
+            self.io.terminal.screens.active,
             sel,
             &.{ .standard, .selection },
             .mixed,
@@ -4217,6 +4225,7 @@ pub fn mouseButtonCallback(
             .copy => {
                 if (self.io.terminal.screens.active.selection) |sel| {
                     try self.copySelectionToClipboards(
+                        self.io.terminal.screens.active,
                         sel,
                         &.{.standard},
                         .mixed,
@@ -4228,6 +4237,7 @@ pub fn mouseButtonCallback(
             },
             .@"copy-or-paste" => if (self.io.terminal.screens.active.selection) |sel| {
                 try self.copySelectionToClipboards(
+                    self.io.terminal.screens.active,
                     sel,
                     &.{.standard},
                     .mixed,
@@ -5126,8 +5136,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            if (self.io.terminal.screens.active.selection) |sel| {
+            const screen = self.renderer_state.caret_screen orelse
+                self.io.terminal.screens.active;
+            if (screen.selection) |sel| {
                 try self.copySelectionToClipboards(
+                    screen,
                     sel,
                     &.{.standard},
                     format,
@@ -5135,13 +5148,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
                 // Clear the selection if configured to do so.
                 if (self.config.selection_clear_on_copy) {
-                    if (self.setSelection(null)) {
-                        self.queueRender() catch |err| {
-                            log.warn("failed to queue render after clear selection err={}", .{err});
-                        };
-                    } else |err| {
+                    if (self.renderer_state.caret_screen != null) {
+                        screen.clearSelection();
+                    } else if (self.setSelection(null)) {} else |err| {
                         log.warn("failed to clear selection after copy err={}", .{err});
                     }
+                    self.queueRender() catch |err| {
+                        log.warn("failed to queue render after clear selection err={}", .{err});
+                    };
                 }
 
                 return true;
@@ -5782,28 +5796,47 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
-            if (screen.caret_mode) return false;
+            if (self.renderer_state.caret_screen != null) return false;
+            const set = self.config.keybind.tables.getPtr("caret") orelse
+                return false;
+            if (self.keyboard.table_stack.items.len >= max_active_key_tables)
+                return false;
 
+            const source = self.io.terminal.screens.active;
+            const screen = try self.alloc.create(terminal.Screen);
+            errdefer self.alloc.destroy(screen);
+            screen.* = try source.clone(
+                global.io(),
+                self.alloc,
+                .{ .screen = .{} },
+                null,
+            );
+            errdefer screen.deinit();
+
+            // Screen clones start at the active area, so restore the viewport
+            // that was visible when caret mode was entered.
+            const viewport = source.pages.pointFromPin(
+                .screen,
+                source.pages.getTopLeft(.viewport),
+            ).?.screen;
+            screen.scroll(.{ .row = viewport.y });
             try screen.enterCaretMode();
-            self.keyboard.caret_mode = true;
 
             // Push the "caret" key table so caret bindings become active.
-            if (self.config.keybind.tables.getPtr("caret")) |set| {
-                if (self.keyboard.table_stack.items.len < max_active_key_tables) {
-                    try self.keyboard.table_stack.append(self.alloc, .{
-                        .set = set,
-                        .once = false,
-                    });
-                    _ = self.rt_app.performAction(
-                        .{ .surface = self },
-                        .key_table,
-                        .{ .activate = "caret" },
-                    ) catch |err| {
-                        log.warn("failed to notify app of key table err={}", .{err});
-                    };
-                }
-            }
+            try self.keyboard.table_stack.append(self.alloc, .{
+                .set = set,
+                .once = false,
+            });
+
+            self.renderer_state.caret_screen = screen;
+            self.keyboard.caret_mode = true;
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .key_table,
+                .{ .activate = "caret" },
+            ) catch |err| {
+                log.warn("failed to notify app of key table err={}", .{err});
+            };
 
             try self.queueRender();
         },
@@ -5812,10 +5845,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
-            if (!screen.caret_mode) return false;
+            const screen = self.renderer_state.caret_screen orelse return false;
 
             screen.exitCaretMode();
+            screen.deinit();
+            self.alloc.destroy(screen);
+            self.renderer_state.caret_screen = null;
+            self.io.terminal.screens.active.scroll(.{ .active = {} });
             self.keyboard.caret_mode = false;
 
             // Pop the "caret" key table.
@@ -5839,8 +5875,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
-            if (!screen.caret_mode) return false;
+            const screen = self.renderer_state.caret_screen orelse return false;
 
             screen.moveCaret(switch (direction) {
                 .left => .left,
@@ -5868,8 +5903,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
-            if (!screen.caret_mode) return false;
+            const screen = self.renderer_state.caret_screen orelse return false;
 
             try screen.setCaretSelectionStyle(.character);
 
@@ -5880,8 +5914,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
-            if (!screen.caret_mode) return false;
+            const screen = self.renderer_state.caret_screen orelse return false;
 
             try screen.setCaretSelectionStyle(.rectangle);
 
@@ -5892,8 +5925,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
-            if (!screen.caret_mode) return false;
+            const screen = self.renderer_state.caret_screen orelse return false;
 
             try screen.selectCaretLine();
 

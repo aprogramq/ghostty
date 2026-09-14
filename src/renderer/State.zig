@@ -19,6 +19,11 @@ mutex: *std.Io.Mutex,
 /// The terminal data.
 terminal: *terminalpkg.Terminal,
 
+/// A frozen screen used for caret-mode navigation. While this is set,
+/// renderers use this screen in place of the active terminal screen. This is
+/// protected by `mutex` and owned by Surface.
+caret_screen: ?*terminalpkg.Screen = null,
+
 /// The terminal inspector, if any. This will be null while the inspector
 /// is not active and will be set when it is active.
 inspector: ?*Inspector = null,
