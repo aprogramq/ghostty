@@ -356,9 +356,7 @@ pub const RenderState = struct {
     /// Update only caret-related state while preserving the previously copied
     /// viewport rows. This is used to freeze visible contents during caret mode
     /// without pausing terminal output in the background.
-    pub fn updateCaretOnly(self: *RenderState, t: *Terminal) bool {
-        const s: *Screen = t.screens.active;
-
+    pub fn updateCaretOnly(self: *RenderState, s: *Screen) bool {
         const viewport_pin = self.viewport_pin orelse return false;
         const caret_viewport_pin = if (s.caret_viewport_pin) |pin|
             pin.*
@@ -440,7 +438,18 @@ pub const RenderState = struct {
         alloc: Allocator,
         t: *Terminal,
     ) Allocator.Error!void {
-        const s: *Screen = t.screens.active;
+        return self.beginUpdateScreen(alloc, t, t.screens.active);
+    }
+
+    /// Begin an update using the given screen in place of the terminal's
+    /// active screen. Terminal-level state such as colors and modes is still
+    /// read from the terminal.
+    pub fn beginUpdateScreen(
+        self: *RenderState,
+        alloc: Allocator,
+        t: *Terminal,
+        s: *Screen,
+    ) Allocator.Error!void {
         const viewport_pin = if (s.caret_mode)
             if (s.caret_viewport_pin) |pin| pin.* else s.pages.getTopLeft(.viewport)
         else
@@ -1502,6 +1511,70 @@ test "basic text" {
     try testing.expectEqual('C', cells[0].get(2).raw.codepoint());
     try testing.expectEqual('D', cells[0].get(3).raw.codepoint());
     try testing.expectEqual(0, cells[0].get(4).raw.codepoint());
+}
+
+test "caret screen preserves rendered and selected text" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(testing.io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("before\r");
+
+    var screen = try t.screens.active.clone(
+        testing.io,
+        alloc,
+        .{ .screen = .{} },
+        null,
+    );
+    defer screen.deinit();
+    try screen.enterCaretMode();
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+
+    // Updating the live terminal must not change either the rendered cells or
+    // the text selected from the caret screen.
+    stream.nextSlice("AFTER!");
+    try testing.expect(state.updateCaretOnly(&screen));
+    try testing.expectEqual(
+        @as(u21, 'b'),
+        state.row_data.items(.cells)[0].get(0).raw.codepoint(),
+    );
+
+    try screen.setCaretSelectionStyle(.character);
+    for (0..5) |_| screen.moveCaret(.right);
+    const selected = try screen.selectionString(alloc, .{
+        .sel = screen.selection.?,
+    });
+    defer alloc.free(selected);
+    try testing.expectEqualStrings("before", selected);
+
+    // Mixed clipboard output formats the same selection twice. Both passes
+    // must use the caret screen because its pins don't belong to the live one.
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var formatter: @import("formatter.zig").ScreenFormatter = .init(
+        &screen,
+        .plain,
+    );
+    formatter.content = .{ .selection = screen.selection.? };
+    try formatter.format(&aw.writer);
+    try testing.expectEqualStrings("before", aw.written());
+    aw.clearRetainingCapacity();
+
+    formatter = .init(&screen, .html);
+    formatter.content = .{ .selection = screen.selection.? };
+    try formatter.format(&aw.writer);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "before") != null);
 }
 
 test "styled text" {

@@ -1352,12 +1352,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
-                const screen = state.terminal.screens.active;
+                const screen = state.caret_screen orelse
+                    state.terminal.screens.active;
                 const frozen_state = screen.caret_mode and
                     self.terminal_frozen_state;
 
                 const caret_only = frozen_state and
-                    self.terminal_state.updateCaretOnly(state.terminal);
+                    self.terminal_state.updateCaretOnly(screen);
 
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
@@ -1365,9 +1366,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // outside of this critical section, keeping our lock
                 // hold time as short as possible.
                 if (!caret_only) {
-                    try self.terminal_state.beginUpdate(
+                    try self.terminal_state.beginUpdateScreen(
                         self.alloc,
                         state.terminal,
+                        screen,
                     );
                 }
 
@@ -1384,7 +1386,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // naturally limits the number of calls to this method (it
                 // can be expensive) and also makes it so we don't need another
                 // cross-thread mailbox message within the IO path.
-                const scrollbar = state.terminal.screens.active.pages.scrollbar();
+                const scrollbar = screen.pages.scrollbar();
 
                 // Get our preedit state
                 const preedit: ?renderer.State.Preedit = preedit: {
