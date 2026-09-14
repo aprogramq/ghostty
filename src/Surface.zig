@@ -5766,7 +5766,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (!screen.caret_mode) return false;
 
-            _ = try screen.setCaretSelectionStyle(.character, true);
+            try screen.setCaretSelectionStyle(.character);
 
             try self.queueRender();
         },
@@ -5778,7 +5778,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (!screen.caret_mode) return false;
 
-            _ = try screen.setCaretSelectionStyle(.rectangle, true);
+            try screen.setCaretSelectionStyle(.rectangle);
 
             try self.queueRender();
         },
@@ -5790,7 +5790,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (!screen.caret_mode) return false;
 
-            _ = try screen.selectCaretLine();
+            try screen.selectCaretLine();
 
             try self.queueRender();
         },

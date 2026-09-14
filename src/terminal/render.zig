@@ -668,23 +668,9 @@ pub const RenderState = struct {
                                 };
                             }
                         }
-                        // const row_pin: PageList.Pin = .{
-                        //     .node = node,
-                        //     .y = @intCast(chunk.start),
-                        // };
-                        // if (row_pin.node == cp.node and row_pin.y == cp.y) {
                     }
                 }
             }
-
-            // Store our pin. We have to store these even if we're not dirty
-            // because dirty is only a renderer optimization. It doesn't
-            // apply to memory movement. This will let us remap any cell
-            // pins back to an exact entry in our RenderState.
-            row_pins[y] = .{
-                .node = node,
-                .y = @intCast(chunk.start),
-            };
 
             // Get our contiguous rows for this chunk.
             const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..][0..take];

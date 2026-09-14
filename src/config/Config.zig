@@ -6777,7 +6777,6 @@ pub const Keybinds = struct {
             try t.put(alloc, .{ .key = .{ .unicode = '^' }, .mods = .{ .shift = true } }, .{ .move_caret = .beginning_of_line });
             try t.put(alloc, .{ .key = .{ .unicode = '$' }, .mods = .{ .shift = true } }, .{ .move_caret = .end_of_line });
 
-
             // Selection
             try t.put(alloc, .{ .key = .{ .unicode = 'v' } }, .toggle_caret_selection);
             try t.put(alloc, .{ .key = .{ .unicode = 'v' }, .mods = .{ .ctrl = true } }, .toggle_caret_rectangle_selection);

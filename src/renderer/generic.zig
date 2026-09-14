@@ -1354,7 +1354,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 const screen = state.terminal.screens.active;
                 const frozen_state = screen.caret_mode and
-                    self.terminal_frozen_state; 
+                    self.terminal_frozen_state;
 
                 const caret_only = frozen_state and
                     self.terminal_state.updateCaretOnly(state.terminal);
@@ -1371,7 +1371,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 }
 
-                //INFO: need research it
                 self.terminal_frozen_state = screen.caret_mode;
 
                 // If our terminal state is dirty at all we need to redo

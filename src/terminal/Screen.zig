@@ -3245,7 +3245,6 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
         sel.endPtr().* = bounds.end();
         sel.rectangle = bounds.rectangle;
         self.dirty.selection = true;
-        return;
     }
 }
 
@@ -3274,29 +3273,26 @@ fn caretSelectionBounds(anchor: Pin, caret: Pin, selection_style: CaretSelection
 }
 
 /// Change selection style without moving its original anchor or the caret.
-/// Selecting an already active toggle style clears the selection.
+/// Selecting an already active style clears the selection.
 pub fn setCaretSelectionStyle(
     self: *Screen,
     selection_style: CaretSelectionStyle,
-    toggle: bool,
-) Allocator.Error!bool {
-    const caret = self.caret_pin orelse return false;
+) Allocator.Error!void {
+    const caret = self.caret_pin orelse return;
 
     // A selection created outside caret mode must not become the anchor for a
     // keyboard selection.
     if (self.selection != null and self.caret_selection_anchor == null) {
         self.clearSelection();
     } else if (self.selection != null) {
-        if (toggle and self.caret_selection_style == selection_style) {
+        if (self.caret_selection_style == selection_style) {
             self.clearSelection();
-            return true;
+            return;
         }
     }
 
     const origin = if (self.caret_selection_anchor) |anchor|
         anchor.*
-    else if (self.selection) |sel|
-        sel.start()
     else
         caret.*;
     const bounds = caretSelectionBounds(origin, caret.*, selection_style);
@@ -3305,12 +3301,11 @@ pub fn setCaretSelectionStyle(
     try self.select(bounds);
     self.caret_selection_anchor = anchor;
     self.caret_selection_style = selection_style;
-    return true;
 }
 
 /// Toggle selection of complete visual rows, without following soft wraps.
-pub fn selectCaretLine(self: *Screen) Allocator.Error!bool {
-    return self.setCaretSelectionStyle(.line, true);
+pub fn selectCaretLine(self: *Screen) Allocator.Error!void {
+    try self.setCaretSelectionStyle(.line);
 }
 
 const CaretWordClass = enum {

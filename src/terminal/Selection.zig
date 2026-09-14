@@ -507,7 +507,6 @@ pub fn adjust(
         .beginning_of_line => end_pin.x = 0,
 
         .end_of_line => end_pin.x = end_pin.node.cols() - 1,
-
     }
 }
 
