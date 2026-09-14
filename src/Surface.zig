@@ -2875,6 +2875,10 @@ fn maybeHandleBinding(
     event: input.KeyEvent,
     insp_ev: ?*inspectorpkg.KeyEvent,
 ) !?InputEffect {
+    // Binding actions may change caret mode, but queued sequence input must
+    // retain the ownership policy from when this event began processing.
+    const caret_mode = self.keyboard.caret_mode;
+
     switch (event.action) {
         // Release events never trigger a binding but we need to check if
         // we consumed the press event so we don't encode the release.
@@ -2916,8 +2920,9 @@ fn maybeHandleBinding(
                 return .ignored;
             }
 
-            // Encode everything up to this point
-            self.endKeySequence(.flush, .retain);
+            // The sequence didn't match, so let its queued input fall through
+            // to the terminal unless caret mode owns the input.
+            self.endKeySequencePassthrough(caret_mode);
 
             return null;
         }
@@ -3065,9 +3070,9 @@ fn maybeHandleBinding(
     // then we act as though a binding didn't exist.
     if (leaf.flags.performable and !performed) {
         // If we're in a sequence, we treat this as if we pressed a key
-        // that doesn't exist in the sequence. Reset our sequence and flush
-        // any queued events.
-        self.endKeySequence(.flush, .retain);
+        // that doesn't exist in the sequence. Reset our sequence and let any
+        // queued events fall through unless caret mode owns the input.
+        self.endKeySequencePassthrough(caret_mode);
 
         return null;
     }
@@ -3097,9 +3102,9 @@ fn maybeHandleBinding(
         return .consumed;
     }
 
-    // If we didn't perform OR we didn't consume, then we want to
-    // encode any queued events for a sequence.
-    self.endKeySequence(.flush, .retain);
+    // If we didn't perform OR we didn't consume, let any queued sequence
+    // events fall through unless caret mode owns the input.
+    self.endKeySequencePassthrough(caret_mode);
 
     return null;
 }
@@ -3158,6 +3163,20 @@ fn catchAllIsIgnore(self: *Surface) bool {
 
 const KeySequenceQueued = enum { flush, drop };
 const KeySequenceMemory = enum { retain, free };
+
+/// End a key sequence whose queued input would normally fall through to the
+/// terminal. Caret mode owns all keyboard input, so it drops the queued input
+/// instead.
+fn endKeySequencePassthrough(self: *Surface, caret_mode: bool) void {
+    self.endKeySequence(
+        keySequencePassthroughAction(caret_mode),
+        .retain,
+    );
+}
+
+fn keySequencePassthroughAction(caret_mode: bool) KeySequenceQueued {
+    return if (caret_mode) .drop else .flush;
+}
 
 /// End a key sequence. Safe to call if no key sequence is active.
 ///
