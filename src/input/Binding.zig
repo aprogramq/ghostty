@@ -529,7 +529,7 @@ pub const Action = union(enum) {
     /// anchor.
     toggle_caret_rectangle_selection,
 
-    /// Select the entire line under the caret when in caret mode.
+    /// Toggle selection of the entire line under the caret when in caret mode.
     select_caret_line,
 
     /// Jump the viewport forward or back by the given number of prompts.
