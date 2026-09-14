@@ -3313,9 +3313,9 @@ pub fn setCaretSelectionStyle(
     return true;
 }
 
-/// Select complete visual rows, without following soft wraps.
+/// Toggle selection of complete visual rows, without following soft wraps.
 pub fn selectCaretLine(self: *Screen) Allocator.Error!bool {
-    return self.setCaretSelectionStyle(.line, false);
+    return self.setCaretSelectionStyle(.line, true);
 }
 
 const CaretWordClass = enum {
