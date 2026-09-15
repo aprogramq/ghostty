@@ -5769,6 +5769,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             self.renderer_state.caret_screen = screen;
             self.keyboard.caret_mode = true;
+            errdefer comptime unreachable;
             _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .key_table,
@@ -5777,7 +5778,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 log.warn("failed to notify app of key table err={}", .{err});
             };
 
-            try self.queueRender();
+            // Ownership has transferred to renderer_state. A failed wakeup
+            // must not run the allocation cleanup above.
+            self.queueRender() catch |err| {
+                log.warn("failed to queue render after entering caret mode err={}", .{err});
+            };
         },
 
         .exit_caret_mode => {
