@@ -1777,6 +1777,19 @@ pub fn updateConfig(
         log.err("error updating configuration err={}", .{err});
         return;
     };
+
+    // Caret mode can't remain active when the new configuration disables it.
+    // Exit before deinitializing the old config because the active key table
+    // contains a pointer into it.
+    if (self.config.caret_mode and !derived.caret_mode) {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        _ = self.exitCaretMode() catch |err| {
+            log.warn("failed to exit caret mode after config change err={}", .{err});
+        };
+    }
+
     self.config.deinit();
     self.config = derived;
 
@@ -5763,30 +5776,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen = self.renderer_state.caret_screen orelse return false;
-
-            screen.exitCaretMode();
-            screen.deinit();
-            self.alloc.destroy(screen);
-            self.renderer_state.caret_screen = null;
-            self.io.terminal.screens.active.scroll(.{ .active = {} });
-            self.keyboard.caret_mode = false;
-
-            // Pop the "caret" key table.
-            switch (self.keyboard.table_stack.items.len) {
-                0 => {},
-                1 => self.keyboard.table_stack.clearAndFree(self.alloc),
-                else => _ = self.keyboard.table_stack.pop(),
-            }
-            _ = self.rt_app.performAction(
-                .{ .surface = self },
-                .key_table,
-                .deactivate,
-            ) catch |err| {
-                log.warn("failed to notify app of key table err={}", .{err});
-            };
-
-            try self.queueRender();
+            return try self.exitCaretMode();
         },
 
         .move_caret => |direction| {
@@ -5851,6 +5841,37 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
     }
 
+    return true;
+}
+
+/// Exit caret mode and release all state owned by the active caret session.
+///
+/// This must be called with the renderer mutex held.
+fn exitCaretMode(self: *Surface) !bool {
+    const screen = self.renderer_state.caret_screen orelse return false;
+
+    screen.exitCaretMode();
+    screen.deinit();
+    self.alloc.destroy(screen);
+    self.renderer_state.caret_screen = null;
+    self.io.terminal.screens.active.scroll(.{ .active = {} });
+    self.keyboard.caret_mode = false;
+
+    // Pop the "caret" key table.
+    switch (self.keyboard.table_stack.items.len) {
+        0 => {},
+        1 => self.keyboard.table_stack.clearAndFree(self.alloc),
+        else => _ = self.keyboard.table_stack.pop(),
+    }
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .key_table,
+        .deactivate,
+    ) catch |err| {
+        log.warn("failed to notify app of key table err={}", .{err});
+    };
+
+    try self.queueRender();
     return true;
 }
 
