@@ -3012,13 +3012,23 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
         .left => {
             var it = pin.cellIterator(.left_up, null);
             _ = it.next();
-            if (it.next()) |next| pin.* = next;
+            while (it.next()) |next| {
+                if (next.rowAndCell().cell.wide == .spacer_tail or
+                    next.rowAndCell().cell.wide == .spacer_head) continue;
+                pin.* = next;
+                break;
+            }
         },
 
         .right => {
             var it = pin.cellIterator(.right_down, null);
             _ = it.next();
-            if (it.next()) |next| pin.* = next;
+            while (it.next()) |next| {
+                if (next.rowAndCell().cell.wide == .spacer_tail or
+                    next.rowAndCell().cell.wide == .spacer_head) continue;
+                pin.* = next;
+                break;
+            }
         },
 
         .page_up => if (pin.up(self.pages.rows)) |new_pin| {
@@ -3092,14 +3102,22 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             }
         },
 
-        .word_left => {
+        .word_left, .big_word_left => {
             var it = pin.cellIterator(.left_up, null);
             _ = it.next();
 
             var target: ?Pin = null;
             var target_class: ?CaretWordClass = null;
             while (it.next()) |next| {
-                const class = caretWordClass(next.rowAndCell().cell);
+                const rac = next.rowAndCell();
+                if (target) |prev| {
+                    if (prev.x == 0 and !rac.row.wrap) break;
+                }
+                if (rac.cell.wide == .spacer_tail or
+                    rac.cell.wide == .spacer_head) continue;
+                var class = caretWordClass(rac.cell);
+                if (adjustment == .big_word_left and class == .punctuation)
+                    class = .keyword;
                 if (class == .whitespace) {
                     if (target != null) break;
                     continue;
@@ -3117,18 +3135,28 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             if (target) |next| pin.* = next;
         },
 
-        .word_right => {
+        .word_right, .big_word_right => {
             var it = pin.cellIterator(.right_down, null);
             const current = it.next() orelse unreachable;
-            const current_class = caretWordClass(current.rowAndCell().cell);
+            var current_class = caretWordClass(current.rowAndCell().cell);
+            if (adjustment == .big_word_right and current_class == .punctuation)
+                current_class = .keyword;
             var current_word_end = current;
             var left_current_word = current_class == .whitespace;
             var next_line: ?Pin = null;
+            var previous = current;
 
             while (it.next()) |next| {
                 if (next_line == null and next.x == 0) next_line = next;
+                if (next.x == 0 and !previous.rowAndCell().row.wrap)
+                    left_current_word = true;
+                previous = next;
 
-                const class = caretWordClass(next.rowAndCell().cell);
+                const cell = next.rowAndCell().cell;
+                if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+                var class = caretWordClass(cell);
+                if (adjustment == .big_word_right and class == .punctuation)
+                    class = .keyword;
                 if (!left_current_word) {
                     if (class == current_class) {
                         current_word_end = next;
@@ -3143,53 +3171,6 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
                 break;
             } else if (!current.eql(current_word_end)) {
                 pin.* = current_word_end;
-            } else if (next_line) |next| {
-                pin.* = next;
-            }
-        },
-
-        .big_word_left => {
-            var it = pin.cellIterator(.left_up, null);
-            _ = it.next();
-
-            var seen_text = false;
-            while (it.next()) |next| {
-                if (isCaretNonWhitespace(next.rowAndCell().cell)) {
-                    pin.* = next;
-                    seen_text = true;
-                    break;
-                }
-            }
-
-            if (seen_text) {
-                while (it.next()) |next| {
-                    if (!isCaretNonWhitespace(next.rowAndCell().cell)) break;
-                    pin.* = next;
-                }
-            }
-        },
-
-        .big_word_right => {
-            var it = pin.cellIterator(.right_down, null);
-            _ = it.next();
-
-            var seen_text = false;
-            var next_line: ?Pin = null;
-            while (it.next()) |next| {
-                if (next_line == null and next.x == 0) next_line = next;
-
-                if (isCaretNonWhitespace(next.rowAndCell().cell)) {
-                    pin.* = next;
-                    seen_text = true;
-                    break;
-                }
-            }
-
-            if (seen_text) {
-                while (it.next()) |next| {
-                    if (!isCaretNonWhitespace(next.rowAndCell().cell)) break;
-                    pin.* = next;
-                }
             } else if (next_line) |next| {
                 pin.* = next;
             }
@@ -3212,6 +3193,9 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
 /// Keep the caret visible and update its selection after movement or resize.
 fn updateCaret(self: *Screen) void {
     const pin = self.caret_pin orelse return;
+
+    // Vertical movement and reflow can land on the tail of a wide character.
+    if (pin.x > 0 and pin.rowAndCell().cell.wide == .spacer_tail) pin.x -= 1;
 
     caret_scroll: {
         // Other motions only scroll enough to keep the caret visible.
@@ -3311,13 +3295,29 @@ fn caretWordClass(cell: *const Cell) CaretWordClass {
     if ((cp >= 'a' and cp <= 'z') or
         (cp >= 'A' and cp <= 'Z') or
         (cp >= '0' and cp <= '9') or
-        cp == '_' or
-        cp >= 0x80)
+        cp == '_')
     {
         return .keyword;
     }
 
-    return .punctuation;
+    if (cp < 0x80) return .punctuation;
+
+    return switch (@import("uucode").get(.general_category, cp)) {
+        .separator_space, .separator_line, .separator_paragraph => .whitespace,
+        .letter_uppercase,
+        .letter_lowercase,
+        .letter_titlecase,
+        .letter_modifier,
+        .letter_other,
+        .mark_nonspacing,
+        .mark_spacing_combining,
+        .mark_enclosing,
+        .number_decimal_digit,
+        .number_letter,
+        .number_other,
+        => .keyword,
+        else => .punctuation,
+    };
 }
 
 fn isCaretNonWhitespace(cell: *const Cell) bool {
@@ -4372,6 +4372,84 @@ test "Screen: caret line selection uses visual rows" {
     const expanded = try s.selectionString(alloc, .{ .sel = s.selection.? });
     defer alloc.free(expanded);
     try testing.expectEqualStrings("abcdefghijkl", expanded);
+}
+
+test "Screen: caret word motion and wide cells" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 24, .rows = 3 });
+    defer s.deinit();
+    try s.testWriteString("ab.cd 界語 ef");
+    try s.enterCaretMode();
+    s.moveCaret(.home);
+
+    s.moveCaret(.word_right);
+    try testing.expectEqual(2, s.caret_pin.?.x);
+    s.moveCaret(.word_right);
+    try testing.expectEqual(3, s.caret_pin.?.x);
+    s.moveCaret(.big_word_left);
+    try testing.expectEqual(0, s.caret_pin.?.x);
+    s.moveCaret(.big_word_right);
+    try testing.expectEqual(6, s.caret_pin.?.x);
+    s.moveCaret(.right);
+    try testing.expectEqual(8, s.caret_pin.?.x);
+    s.moveCaret(.left);
+    try testing.expectEqual(6, s.caret_pin.?.x);
+    s.moveCaret(.word_right);
+    try testing.expectEqual(11, s.caret_pin.?.x);
+    s.moveCaret(.word_left);
+    try testing.expectEqual(6, s.caret_pin.?.x);
+}
+
+test "Screen: caret word motion respects hard line boundaries" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer s.deinit();
+    try s.testWriteString("abcd\nefgh");
+    try s.enterCaretMode();
+    s.moveCaret(.home);
+    s.moveCaret(.word_right);
+    try testing.expectEqual(point.Point{ .screen = .{ .x = 0, .y = 1 } }, s.pages.pointFromPin(.screen, s.caret_pin.?.*).?);
+    s.moveCaret(.end_of_line);
+    s.moveCaret(.word_left);
+    try testing.expectEqual(0, s.caret_pin.?.x);
+    try testing.expectEqual(1, s.pages.pointFromPin(.screen, s.caret_pin.?.*).?.screen.y);
+}
+
+test "Screen: caret word motion recognizes Unicode boundaries" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer s.deinit();
+    try s.testWriteString("один—два\u{2003}три");
+    try s.enterCaretMode();
+    s.moveCaret(.home);
+    s.moveCaret(.word_right);
+    try testing.expectEqual(4, s.caret_pin.?.x);
+    s.moveCaret(.word_right);
+    try testing.expectEqual(5, s.caret_pin.?.x);
+    s.moveCaret(.big_word_right);
+    try testing.expectEqual(9, s.caret_pin.?.x);
+}
+
+test "Screen: caret stays visible at half-page boundaries" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{
+        .cols = 10,
+        .rows = 4,
+        .max_scrollback_bytes = null,
+    });
+    defer s.deinit();
+    for (0..30) |_| try s.testWriteString("hello\n");
+    try s.enterCaretMode();
+    s.moveCaret(.home);
+    for (0..20) |_| {
+        s.moveCaret(.half_page_down);
+        try testing.expect(s.pages.pointFromPin(.viewport, s.caret_pin.?.*) != null);
+    }
+    for (0..20) |_| {
+        s.moveCaret(.half_page_up);
+        try testing.expect(s.pages.pointFromPin(.viewport, s.caret_pin.?.*) != null);
+    }
+    try testing.expectEqual(0, s.pages.pointFromPin(.screen, s.caret_pin.?.*).?.screen.y);
 }
 
 test "Screen: caret selection survives reflow" {

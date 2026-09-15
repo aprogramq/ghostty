@@ -6771,44 +6771,42 @@ pub const Keybinds = struct {
                 gop.key_ptr.* = "caret";
                 gop.value_ptr.* = .{};
             }
-            const t = gop.value_ptr;
-
-            // Line movement
-            try t.put(alloc, .{ .key = .{ .physical = .arrow_up } }, .{ .move_caret = .up });
-            try t.put(alloc, .{ .key = .{ .physical = .arrow_down } }, .{ .move_caret = .down });
-            try t.put(alloc, .{ .key = .{ .physical = .arrow_left } }, .{ .move_caret = .left });
-            try t.put(alloc, .{ .key = .{ .physical = .arrow_right } }, .{ .move_caret = .right });
-            try t.put(alloc, .{ .key = .{ .unicode = 'j' } }, .{ .move_caret = .down });
-            try t.put(alloc, .{ .key = .{ .unicode = 'k' } }, .{ .move_caret = .up });
-            try t.put(alloc, .{ .key = .{ .unicode = 'h' } }, .{ .move_caret = .left });
-            try t.put(alloc, .{ .key = .{ .unicode = 'l' } }, .{ .move_caret = .right });
-            try t.put(alloc, .{ .key = .{ .unicode = 'b' } }, .{ .move_caret = .word_left });
-            try t.put(alloc, .{ .key = .{ .unicode = 'w' } }, .{ .move_caret = .word_right });
-            try t.put(alloc, .{ .key = .{ .unicode = 'B' }, .mods = .{ .shift = true } }, .{ .move_caret = .big_word_left });
-            try t.put(alloc, .{ .key = .{ .unicode = 'W' }, .mods = .{ .shift = true } }, .{ .move_caret = .big_word_right });
-
-            // Page movement
-            try t.put(alloc, .{ .key = .{ .unicode = 'd' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .half_page_down });
-            try t.put(alloc, .{ .key = .{ .unicode = 'u' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .half_page_up });
-            try t.put(alloc, .{ .key = .{ .unicode = 'f' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .page_down });
-            try t.put(alloc, .{ .key = .{ .unicode = 'b' }, .mods = .{ .ctrl = true } }, .{ .move_caret = .page_up });
-
-            // Jump to top/bottom
-            t.parseAndPut(alloc, "g>g=move_caret:home") catch unreachable;
-            try t.put(alloc, .{ .key = .{ .unicode = 'G' }, .mods = .{ .shift = true } }, .{ .move_caret = .end });
-            try t.put(alloc, .{ .key = .{ .unicode = '^' }, .mods = .{ .shift = true } }, .{ .move_caret = .beginning_of_line });
-            try t.put(alloc, .{ .key = .{ .unicode = '$' }, .mods = .{ .shift = true } }, .{ .move_caret = .end_of_line });
-
-            // Selection
-            try t.put(alloc, .{ .key = .{ .unicode = 'v' } }, .toggle_caret_selection);
-            try t.put(alloc, .{ .key = .{ .unicode = 'v' }, .mods = .{ .ctrl = true } }, .toggle_caret_rectangle_selection);
-            try t.put(alloc, .{ .key = .{ .unicode = 'V' }, .mods = .{ .shift = true } }, .select_caret_line);
-            try t.put(alloc, .{ .key = .{ .unicode = 'y' } }, .{ .copy_to_clipboard = .mixed });
-            t.parseAndPut(alloc, "chain=exit_caret_mode") catch unreachable;
-
-            // Exit
-            try t.put(alloc, .{ .key = .{ .physical = .escape } }, .exit_caret_mode);
-            try t.put(alloc, .{ .key = .{ .unicode = 'q' } }, .exit_caret_mode);
+            const table = gop.value_ptr;
+            const bindings = [_][]const u8{
+                "up=move_caret:up",
+                "down=move_caret:down",
+                "left=move_caret:left",
+                "right=move_caret:right",
+                "j=move_caret:down",
+                "k=move_caret:up",
+                "h=move_caret:left",
+                "l=move_caret:right",
+                "b=move_caret:word_left",
+                "w=move_caret:word_right",
+                "shift+b=move_caret:big_word_left",
+                "shift+w=move_caret:big_word_right",
+                "ctrl+d=move_caret:half_page_down",
+                "ctrl+u=move_caret:half_page_up",
+                "ctrl+f=move_caret:page_down",
+                "ctrl+b=move_caret:page_up",
+                "g>g=move_caret:home",
+                "shift+g=move_caret:end",
+                "shift+^=move_caret:beginning_of_line",
+                "shift+$=move_caret:end_of_line",
+                "v=toggle_caret_selection",
+                "ctrl+v=toggle_caret_rectangle_selection",
+                "shift+v=select_caret_line",
+                "y=copy_to_clipboard",
+                "chain=exit_caret_mode",
+                "escape=exit_caret_mode",
+                "q=exit_caret_mode",
+            };
+            for (bindings) |binding| {
+                table.parseAndPut(alloc, binding) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => unreachable,
+                };
+            }
         }
 
         // Tabs common to all platforms
@@ -7673,6 +7671,38 @@ pub const Keybinds = struct {
     /// Used by Formatter
     pub fn formatEntry(self: Keybinds, formatter: formatterpkg.EntryFormatter) !void {
         try self.formatEntryDocs(formatter, false);
+    }
+
+    test "caret default bindings and overrides" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var keybinds: Keybinds = .{};
+        try keybinds.init(alloc);
+        const entry = keybinds.set.get(.{
+            .key = .{ .unicode = 'x' },
+            .mods = inputpkg.ctrlOrSuper(.{ .shift = true }),
+        }).?;
+        try testing.expect(entry.value_ptr.leaf.flags.performable);
+        try testing.expectEqual(inputpkg.Binding.Action.enter_caret_mode, entry.value_ptr.leaf.action);
+
+        const table = keybinds.tables.getPtr("caret").?;
+        const shifted = table.getEvent(.{
+            .key = .key_w,
+            .unshifted_codepoint = 'w',
+            .mods = .{ .shift = true },
+        }).?;
+        try testing.expectEqual(inputpkg.Binding.Action{ .move_caret = .big_word_right }, shifted.value_ptr.leaf.action);
+        const copy = table.getEvent(.{ .utf8 = "y" }).?;
+        const actions = copy.value_ptr.leaf_chained.actions.items;
+        try testing.expectEqual(2, actions.len);
+        try testing.expectEqual(inputpkg.Binding.Action{ .copy_to_clipboard = .mixed }, actions[0]);
+        try testing.expectEqual(inputpkg.Binding.Action.exit_caret_mode, actions[1]);
+
+        try keybinds.parseCLI(alloc, "caret/w=move_caret:down");
+        const overridden = table.getEvent(.{ .utf8 = "w" }).?;
+        try testing.expectEqual(inputpkg.Binding.Action{ .move_caret = .down }, overridden.value_ptr.leaf.action);
     }
 
     test "parseCLI" {
