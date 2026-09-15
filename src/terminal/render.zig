@@ -1557,6 +1557,36 @@ test "caret render updates selection and shaping rows" {
     try testing.expect(state.selection_cache == null);
 }
 
+test "caret render survives live screen replacement and snapshot resize" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try Terminal.init(testing.io, alloc, .{ .cols = 8, .rows = 3 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("before\r");
+
+    var screen = try t.screens.active.clone(testing.io, alloc, .{ .screen = .{} }, null);
+    defer screen.deinit();
+    try screen.enterCaretMode();
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+
+    stream.nextSlice("\x1b[?1049hAFTER!");
+    try screen.resize(.{ .cols = 4, .rows = 4 });
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+    try testing.expectEqual(4, state.cols);
+    try testing.expectEqual(4, state.rows);
+    try testing.expectEqual(@as(u21, 'b'), state.row_data.items(.cells)[0].get(0).raw.codepoint());
+
+    try state.update(alloc, &t);
+    try testing.expectEqual(8, state.cols);
+    try testing.expectEqual(@as(u21, 'A'), state.row_data.items(.cells)[0].get(0).raw.codepoint());
+}
+
 test "styled text" {
     const testing = std.testing;
     const alloc = testing.allocator;

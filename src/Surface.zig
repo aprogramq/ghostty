@@ -2520,6 +2520,22 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     // We have to update the IO thread no matter what because we send
     // pixel-level sizing to the subprocess.
     const grid_size = self.size.grid();
+    if (self.keyboard.caret_mode != null) {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        const screen = self.renderer_state.caret_screen.?;
+        if (screen.pages.cols != grid_size.columns or
+            screen.pages.rows != grid_size.rows)
+        {
+            screen.resize(.{
+                .cols = grid_size.columns,
+                .rows = grid_size.rows,
+            }) catch |err| {
+                log.warn("failed to resize caret screen err={}", .{err});
+            };
+        }
+    }
     if (grid_size.columns < 5 and (self.size.padding.left > 0 or self.size.padding.right > 0)) {
         log.warn("WARNING: very small terminal grid detected with padding " ++
             "set. Is your padding reasonable?", .{});

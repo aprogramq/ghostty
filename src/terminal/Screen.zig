@@ -2234,6 +2234,8 @@ pub inline fn resize(
             page.hyperlink_set.release(page.memory, cursor_hyperlink_id);
         }
     }
+
+    self.updateCaret();
 }
 
 fn clearPromptForRedraw(
@@ -4294,6 +4296,35 @@ test "Screen: caret starts in the visible viewport" {
     try s.enterCaretMode();
     try testing.expectEqual(point.Point{ .viewport = .{ .x = 3, .y = 2 } }, s.pages.pointFromPin(.viewport, s.caret_pin.?.*).?);
     try testing.expect(viewport.eql(s.pages.getTopLeft(.viewport)));
+}
+
+test "Screen: caret selection survives reflow" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try Screen.init(testing.io, alloc, .{
+        .cols = 8,
+        .rows = 4,
+        .max_scrollback_bytes = null,
+    });
+    defer s.deinit();
+    try s.testWriteString("abcdefghijkl");
+    try s.enterCaretMode();
+    s.moveCaret(.home);
+    for (0..6) |_| s.moveCaret(.right);
+    try s.setCaretSelectionStyle(.character);
+    s.moveCaret(.right);
+    s.moveCaret(.right);
+    try s.resize(.{ .cols = 4, .rows = 3 });
+    const text = try s.selectionString(alloc, .{ .sel = s.selection.? });
+    defer alloc.free(text);
+    try testing.expectEqualStrings("ghi", text);
+    try testing.expect(s.pages.pointFromPin(.viewport, s.caret_pin.?.*) != null);
+
+    try s.selectCaretLine();
+    try s.resize(.{ .cols = 6, .rows = 4 });
+    try testing.expectEqual(0, s.selection.?.start().x);
+    try testing.expectEqual(5, s.selection.?.end().x);
+    s.assertIntegrity();
 }
 
 test "Screen forwards optional scrollback limits" {
