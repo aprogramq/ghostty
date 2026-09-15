@@ -510,18 +510,35 @@ pub const Action = union(enum) {
     /// Enter caret (keyboard navigation) mode. The caret is placed at the
     /// terminal cursor when it is visible, or at the bottom of the current
     /// viewport at the cursor's column otherwise. Also pushes the "caret" key
-    /// table
+    /// table. Requires `caret-mode` to be enabled.
     enter_caret_mode,
 
-    /// Exit caret mode. Also pops the "caret" key table.
+    /// Exit caret mode and return to the live terminal. Also pops the "caret"
+    /// key table and any tables activated during caret mode.
     exit_caret_mode,
 
-    /// Move the caret in caret mode.
+    /// Move the caret in caret mode, extending any active caret selection.
+    ///
+    /// Valid arguments are:
+    ///
+    ///   - `left`, `right`, `up`, `down`: move one character or visual row.
+    ///   - `page_up`, `page_down`: move one viewport height.
+    ///   - `half_page_up`, `half_page_down`: move the caret and viewport by
+    ///     half a page.
+    ///   - `home`, `end`: move to the start of scrollback or the end of the
+    ///     last non-empty row.
+    ///   - `beginning_of_line`, `end_of_line`: move to the first or last
+    ///     non-whitespace character in the visual row.
+    ///   - `word_left`, `word_right`: move to the previous or next word start,
+    ///     treating punctuation as a separate word.
+    ///   - `big_word_left`, `big_word_right`: move to the previous or next word
+    ///     start, separating words only at whitespace or hard line breaks.
     move_caret: MoveCaret,
 
     /// Toggle a selection anchored at the caret position. If no selection
-    /// exists, one is created at the current caret. If a selection exists,
-    /// it is cleared.
+    /// exists, one is created at the current caret. An existing character
+    /// selection is cleared; other caret selection styles are converted while
+    /// preserving the anchor.
     toggle_caret_selection,
 
     /// Toggle a rectangular selection anchored at the caret position. An
@@ -529,7 +546,8 @@ pub const Action = union(enum) {
     /// anchor.
     toggle_caret_rectangle_selection,
 
-    /// Toggle selection of the entire line under the caret when in caret mode.
+    /// Toggle selection of complete visual rows in caret mode. Soft-wrapped
+    /// rows are selected individually.
     select_caret_line,
 
     /// Jump the viewport forward or back by the given number of prompts.

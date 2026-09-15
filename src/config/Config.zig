@@ -778,6 +778,19 @@ foreground: Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
 /// enters caret mode. This does not enter caret mode automatically. The default
 /// keybinding can be overridden like any other keybinding.
 ///
+/// Caret mode displays a snapshot of the terminal text, including scrollback,
+/// while the running program continues in the background. Kitty graphics are
+/// hidden in this mode. Keyboard input and mouse events are not sent to the
+/// program until caret mode exits.
+///
+/// The built-in `caret` key table provides arrow-key and Vim-style navigation.
+/// Use `v` for character selection, `V` for line selection, and `ctrl+v` for
+/// rectangular selection. Press `y` to copy and exit, or `escape` or `q` to exit
+/// without copying. Bindings in this table can be customized with the `caret/`
+/// prefix, for example `keybind = caret/enter=copy_to_clipboard`.
+///
+/// Reloading the configuration or starting a search exits caret mode.
+///
 /// The default value is `false`.
 ///
 /// Available since: 1.4.0
