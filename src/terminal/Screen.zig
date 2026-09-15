@@ -442,6 +442,8 @@ pub fn memoryUsage(self: *const Screen) MemoryUsage {
 /// - Disables protection mode
 ///
 pub fn reset(self: *Screen) void {
+    self.exitCaretMode();
+
     // Reset our pages
     self.pages.reset();
 
