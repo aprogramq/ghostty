@@ -3516,6 +3516,10 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
+    // Caret mode owns the visible viewport. Ignore scroll input rather than
+    // moving the viewport or forwarding mouse reports to the application.
+    if (self.keyboard.caret_mode) return;
+
     const y: ScrollAmount = if (yoff == 0) .{} else y: {
         // We use cell_size to determine if we have accumulated enough to trigger a scroll
         const cell_size: f64 = @floatFromInt(self.size.cell.height);
@@ -5283,6 +5287,10 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_to_row => |n| {
+            // Native scrollbars use this action for mouse-driven scrolling.
+            // Keep the caret viewport fixed while caret mode is active.
+            if (self.keyboard.caret_mode) return false;
+
             {
                 self.renderer_state.mutex.lockUncancelable(global.io());
                 defer self.renderer_state.mutex.unlock(global.io());
