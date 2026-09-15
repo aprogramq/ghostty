@@ -66,7 +66,59 @@ pub const SurfaceScrolledWindow = extern struct {
 
     fn init(self: *Self, _: *Class) callconv(.c) void {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
+
+        const priv = self.private();
+        const scrollbar = priv.scrolled_window.getVscrollbar();
+
+        const click = gtk.GestureClick.new();
+        click.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.GestureClick.signals.pressed.connect(
+            click,
+            *Self,
+            scrollbarPressed,
+            self,
+            .{},
+        );
+        scrollbar.addController(click.as(gtk.EventController));
+
+        const scroll = gtk.EventControllerScroll.new(.{
+            .vertical = true,
+            .horizontal = true,
+        });
+        scroll.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.EventControllerScroll.signals.scroll.connect(
+            scroll,
+            *Self,
+            scrollbarScroll,
+            self,
+            .{},
+        );
+        scrollbar.addController(scroll.as(gtk.EventController));
+
         if (gtk_version.runtimeUntil(4, 20, 1)) self.disableKineticScroll();
+    }
+
+    fn scrollbarPressed(
+        gesture: *gtk.GestureClick,
+        _: c_int,
+        _: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const surface = self.private().surface orelse return;
+        if (!surface.keyTableActive("caret")) return;
+
+        _ = gesture.as(gtk.Gesture).setState(.claimed);
+    }
+
+    fn scrollbarScroll(
+        _: *gtk.EventControllerScroll,
+        _: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) c_int {
+        const surface = self.private().surface orelse return 0;
+        return @intFromBool(surface.keyTableActive("caret"));
     }
 
     fn disableKineticScroll(self: *Self) void {
