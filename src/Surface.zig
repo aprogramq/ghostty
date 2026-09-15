@@ -2577,6 +2577,8 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
 
+    if (self.keyboard.caret_mode != null) return;
+
     // We clear our selection when ANY OF:
     // 1. We have an existing preedit
     // 2. We have preedit text
@@ -2735,6 +2737,7 @@ pub fn keyCallback(
     // Handle keybindings first. We need to handle this on all events
     // (press, repeat, release) because a press may perform a binding but
     // a release should not encode if we consumed the press.
+    const caret_mode = self.keyboard.caret_mode != null;
     if (try self.maybeHandleBinding(
         event,
         if (insp_ev) |*ev| ev else null,
@@ -2748,7 +2751,7 @@ pub fn keyCallback(
 
     // Caret mode owns all keyboard input, including release events and
     // modifier-only events that don't match its key table.
-    if (self.keyboard.caret_mode != null) return .consumed;
+    if (caret_mode or self.keyboard.caret_mode != null) return .consumed;
 
     // If this input event has text, then we hide the mouse if configured.
     // We only do this on pressed events to avoid hiding the mouse when we
@@ -3230,13 +3233,9 @@ const KeySequenceMemory = enum { retain, free };
 /// instead.
 fn endKeySequencePassthrough(self: *Surface, caret_mode: bool) void {
     self.endKeySequence(
-        keySequencePassthroughAction(caret_mode),
+        if (caret_mode) .drop else .flush,
         .retain,
     );
-}
-
-fn keySequencePassthroughAction(caret_mode: bool) KeySequenceQueued {
-    return if (caret_mode) .drop else .flush;
 }
 
 /// End a key sequence. Safe to call if no key sequence is active.
@@ -3907,6 +3906,10 @@ pub fn mouseButtonCallback(
 
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
+
+    // The displayed snapshot doesn't share coordinates with the live terminal.
+    // Consume clicks rather than selecting or reporting against hidden content.
+    if (self.keyboard.caret_mode != null) return true;
 
     // Update our modifiers if they changed
     self.modsChanged(mods);
@@ -4585,6 +4588,8 @@ pub fn mousePressureCallback(
     // Update our pressure stage.
     self.mouse.pressure_stage = stage;
 
+    if (self.keyboard.caret_mode != null) return;
+
     // A deep press is pressure-sensitive pointer input, such as macOS force
     // click / deep click on a trackpad, that occurs while the left mouse
     // button is already down. Treat it as the platform text-selection
@@ -4637,6 +4642,11 @@ pub fn cursorPosCallback(
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
+
+    if (self.keyboard.caret_mode != null) {
+        if (self.mouse.hidden) self.showMouse();
+        return;
+    }
 
     // log.debug("cursor pos x={} y={} mods={?}", .{ pos.x, pos.y, mods });
 
@@ -4893,6 +4903,36 @@ fn showMouse(self: *Surface) void {
 /// will ever return false. We can expand this in the future if it becomes
 /// useful. We did previous/next tab so we could implement #498.
 pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool {
+    // Bindings outside the caret table can still invoke application actions,
+    // but must not send input to or navigate the hidden live terminal.
+    if (self.keyboard.caret_mode != null) switch (action) {
+        .csi,
+        .esc,
+        .text,
+        .cursor_key,
+        .paste_from_clipboard,
+        .paste_from_selection,
+        .reset,
+        .clear_screen,
+        .scroll_to_top,
+        .scroll_to_bottom,
+        .scroll_to_row,
+        .scroll_to_selection,
+        .scroll_page_up,
+        .scroll_page_down,
+        .scroll_page_fractional,
+        .scroll_page_lines,
+        .jump_to_prompt,
+        => return false,
+
+        .write_screen_file,
+        .write_scrollback_file,
+        .write_selection_file,
+        => |v| if (v.action == .paste) return false,
+
+        else => {},
+    };
+
     // Forward app-scoped actions to the app. Some app-scoped actions are
     // special-cased here because they do some special things when performed
     // from the surface.
@@ -5332,10 +5372,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_to_row => |n| {
-            // Native scrollbars use this action for mouse-driven scrolling.
-            // Keep the caret viewport fixed while caret mode is active.
-            if (self.keyboard.caret_mode != null) return false;
-
             {
                 self.renderer_state.mutex.lockUncancelable(global.io());
                 defer self.renderer_state.mutex.unlock(global.io());
@@ -5693,7 +5729,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // but don't encode the key that triggered this action. This
             // will do that because leaf keys (keys with bindings) aren't
             // in the queued encoding list.
-            self.endKeySequence(.flush, .retain);
+            self.endKeySequencePassthrough(self.keyboard.caret_mode != null);
         },
 
         .crash => |location| switch (location) {
@@ -5806,6 +5842,19 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.keyboard.caret_mode = self.keyboard.table_stack.items.len - 1;
             errdefer comptime unreachable;
 
+            // A gesture begun before entry must not keep scrolling the live
+            // terminal while keyboard navigation owns the viewport.
+            self.mouse.selection_gesture.reset(&self.io.terminal);
+            self.mouse.over_link = false;
+            self.mouse.link_point = null;
+            self.renderer_state.mouse.point = null;
+            if (self.selection_scroll_active) {
+                self.queueIo(.{ .selection_scroll = false }, .locked);
+            }
+            if (self.renderer_state.preedit) |preedit| {
+                preedit.deinit(self.alloc);
+                self.renderer_state.preedit = null;
+            }
             _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .key_table,
@@ -6368,6 +6417,7 @@ fn completeClipboardPaste(
     data: []const u8,
     allow_unsafe: bool,
 ) !void {
+    if (self.keyboard.caret_mode != null) return;
     if (data.len == 0) return;
 
     const encode_opts: input.paste.Options = encode_opts: {
@@ -6451,6 +6501,7 @@ fn completeClipboardPasteEvent(
     clipboard: apprt.Clipboard,
     available: []const []const u8,
 ) !bool {
+    if (self.keyboard.caret_mode != null) return false;
     if (self.readonly) return false;
 
     const kitty_clipboard = terminal.kitty.clipboard;
@@ -6779,6 +6830,48 @@ fn presentSurface(self: *Surface) !void {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+test "caret mode consumes unmatched key events and text input" {
+    const testing = std.testing;
+    const surface = try testing.allocator.create(Surface);
+    defer testing.allocator.destroy(surface);
+    surface.alloc = testing.allocator;
+    surface.inspector = null;
+    surface.keyboard = .{ .caret_mode = 0 };
+    surface.config.key_remaps = .empty;
+    surface.config.keybind = .{};
+    surface.config.vt_kam_allowed = false;
+
+    for ([_]input.KeyEvent{
+        .{ .key = .key_a, .utf8 = "a" },
+        .{ .key = .key_a, .action = .repeat, .utf8 = "a" },
+        .{ .key = .key_a, .action = .release },
+        .{ .key = .shift_left, .mods = .{ .shift = true } },
+        .{ .key = .shift_left, .action = .release },
+        .{ .utf8 = "é", .composing = true },
+    }) |event| {
+        try testing.expectEqual(InputEffect.consumed, try surface.keyCallback(event));
+    }
+
+    // IME commits and clipboard completion bypass keyCallback.
+    try surface.textCallback("committed text");
+    try surface.completeClipboardPaste("clipboard text", false);
+    try testing.expect(!try surface.completeClipboardPasteEvent(.standard, &.{"text/plain"}));
+    for ([_]input.Binding.Action{
+        .{ .text = "text" },
+        .{ .csi = "A" },
+        .{ .esc = "c" },
+        .paste_from_clipboard,
+        .paste_from_selection,
+        .{ .scroll_to_row = 1 },
+        .{ .write_screen_file = .paste },
+        .{ .write_scrollback_file = .paste },
+        .{ .write_selection_file = .paste },
+        .clear_screen,
+    }) |action| {
+        try testing.expect(!try surface.performBindingAction(action));
+    }
 }
 
 test "queueIo frees allocated writes in readonly mode" {

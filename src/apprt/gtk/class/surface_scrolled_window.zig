@@ -106,7 +106,8 @@ pub const SurfaceScrolledWindow = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const surface = self.private().surface orelse return;
-        if (!surface.keyTableActive("caret")) return;
+        const core = surface.core() orelse return;
+        if (core.keyboard.caret_mode == null) return;
 
         _ = gesture.as(gtk.Gesture).setState(.claimed);
     }
@@ -118,7 +119,8 @@ pub const SurfaceScrolledWindow = extern struct {
         self: *Self,
     ) callconv(.c) c_int {
         const surface = self.private().surface orelse return 0;
-        return @intFromBool(surface.keyTableActive("caret"));
+        const core = surface.core() orelse return 0;
+        return @intFromBool(core.keyboard.caret_mode != null);
     }
 
     fn disableKineticScroll(self: *Self) void {

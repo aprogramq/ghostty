@@ -1005,12 +1005,6 @@ pub const Surface = extern struct {
         }
     }
 
-    pub fn keyTableActive(self: *Self, target: []const u8) bool {
-        return for (self.private().key_tables.items) |name| {
-            if (std.mem.eql(u8, name, target)) break true;
-        } else false;
-    }
-
     pub fn showOnScreenKeyboard(self: *Self, event: ?*gdk.Event) bool {
         const priv = self.private();
         return priv.im_context.as(gtk.IMContext).activateOsk(event) != 0;
