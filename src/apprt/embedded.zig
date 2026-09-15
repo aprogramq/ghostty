@@ -1875,7 +1875,7 @@ pub const CAPI = struct {
         defer core_surface.renderer_state.mutex.unlock(global.io());
 
         // If we don't have a selection, do nothing.
-        const core_sel = core_surface.io.terminal.screens.active.selection orelse return false;
+        const core_sel = core_surface.renderer_state.screen().selection orelse return false;
 
         // Read the text from the selection.
         return readTextLocked(surface, core_sel, result);
@@ -1895,7 +1895,7 @@ pub const CAPI = struct {
         defer surface.core_surface.renderer_state.mutex.unlock(global.io());
 
         const core_sel = sel.core(
-            surface.core_surface.renderer_state.terminal.screens.active,
+            surface.core_surface.renderer_state.screen(),
         ) orelse return false;
 
         return readTextLocked(surface, core_sel, result);
