@@ -234,9 +234,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The render state we update per loop.
         terminal_state: terminal.RenderState = .empty,
 
-        /// True after the terminal snapshot for caret mode has been captured.
-        terminal_frozen_state: bool = false,
-
         /// The number of frames since the last terminal state reset.
         /// We reset the terminal state after ~100,000 frames (about 10 to
         /// 15 minutes at 120Hz) to prevent wasted memory buildup from
@@ -1292,7 +1289,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.terminal_state.deinit(self.alloc);
                 self.terminal_state = .empty;
                 self.terminal_state_frame_count = 0;
-                self.terminal_frozen_state = false;
             }
             self.terminal_state_frame_count += 1;
 
@@ -1308,7 +1304,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 preedit: ?renderer.State.Preedit,
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
-                terminal_state_began: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1327,7 +1322,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 defer state.unlockDemand(global.io());
 
                 // If we're in a synchronized output state, we pause all rendering.
-                if (state.terminal.modes.get(.synchronized_output)) {
+                if (state.caret_screen == null and
+                    state.terminal.modes.get(.synchronized_output))
+                {
                     log.debug("synchronized output started, skipping render", .{});
                     return;
                 }
@@ -1352,28 +1349,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
-                const screen = state.caret_screen orelse
-                    state.terminal.screens.active;
-                const frozen_state = screen.caret_mode and
-                    self.terminal_frozen_state;
-
-                const caret_only = frozen_state and
-                    self.terminal_state.updateCaretOnly(screen);
+                const screen = state.screen();
 
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
                 // denormalization) is deferred to the endUpdate call
                 // outside of this critical section, keeping our lock
                 // hold time as short as possible.
-                if (!caret_only) {
-                    try self.terminal_state.beginUpdateScreen(
-                        self.alloc,
-                        state.terminal,
-                        screen,
-                    );
-                }
-
-                self.terminal_frozen_state = screen.caret_mode;
+                try self.terminal_state.beginUpdateScreen(
+                    self.alloc,
+                    state.terminal,
+                    screen,
+                );
 
                 // If our terminal state is dirty at all we need to redo
                 // the viewport search.
@@ -1390,6 +1377,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Get our preedit state
                 const preedit: ?renderer.State.Preedit = preedit: {
+                    if (state.caret_screen != null) break :preedit null;
                     const p = state.preedit orelse break :preedit null;
                     break :preedit try p.clone(arena_alloc);
                 };
@@ -1401,6 +1389,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // This must happen before the dirty check below:
                 // advancing a frame marks the image state dirty.
                 self.kitty_animation_next_ms = next: {
+                    if (state.caret_screen != null) break :next null;
+
                     // Likely case: we have no kitty images, so do nothing.
                     const storage = &state.terminal.screens.active.kitty_images;
                     if (storage.images.count() == 0) break :next null;
@@ -1428,7 +1418,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // If we have any virtual references, we must also rebuild our
                 // kitty state on every frame because any cell change can move
                 // an image.
-                if (self.images.kittyRequiresUpdate(state.terminal)) {
+                if (state.caret_screen != null) {
+                    // Screen clones contain text but not Kitty image storage.
+                    // Live image placements don't belong to this viewport.
+                    self.draw_mutex.lockUncancelable(global.io());
+                    defer self.draw_mutex.unlock(global.io());
+                    self.images.kittyClear();
+                    state.terminal.screens.active.kitty_images.dirty = true;
+                } else if (self.images.kittyRequiresUpdate(state.terminal)) {
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lockUncancelable(global.io());
@@ -1476,16 +1473,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
-                    .terminal_state_began = !caret_only,
                 };
             };
 
             // Outside the critical area, complete the update we began
             // within it. This must be done before anything reads the
-            // render state.
-            if (critical.terminal_state_began) {
-                self.terminal_state.endUpdate();
-            }
+            // render state (e.g. rebuildCells).
+            self.terminal_state.endUpdate();
 
             // Outside the critical area we can update our links to contain
             // our regex results.
@@ -2812,68 +2806,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            // Draw the keyboard-navigation caret as a block cursor.
-            caret: {
-                const caret_vp = state.caret orelse break :caret;
-                const caret_cell = state.row_data.items(.cells)[caret_vp.y].get(caret_vp.x);
-                const caret_style: terminal.Style = if (caret_cell.raw.hasStyling())
-                    caret_cell.style
-                else
-                    .{};
-                const wide = caret_vp.wide_tail or caret_cell.raw.wide == .wide;
-                const x = if (caret_vp.wide_tail)
-                    caret_vp.x -| 1
-                else
-                    caret_vp.x;
-
-                self.addCursor(&.{
-                    .active = .{ .x = caret_vp.x, .y = caret_vp.y },
-                    .viewport = caret_vp,
-                    .cell = caret_cell.raw,
-                    .style = caret_style,
-                    .visual_style = .block,
-                    .password_input = false,
-                    .visible = true,
-                    .blinking = false,
-                }, .block, state.colors.foreground);
-
-                self.uniforms.cursor_pos = .{ x, caret_vp.y };
-                self.uniforms.bools.cursor_wide = wide;
-
-                const caret_text_color = if (self.config.cursor_text) |txt| blk: {
-                    if (txt == .color) break :blk txt.color.toTerminalRGB();
-
-                    const fg_style = caret_style.fg(.{
-                        .default = state.colors.foreground,
-                        .palette = &state.colors.palette,
-                        .bold = self.config.bold_color,
-                    });
-                    const bg_style = caret_style.bg(
-                        &caret_cell.raw,
-                        &state.colors.palette,
-                    ) orelse state.colors.background;
-
-                    break :blk switch (txt) {
-                        .@"cell-foreground" => if (caret_style.flags.inverse)
-                            bg_style
-                        else
-                            fg_style,
-                        .@"cell-background" => if (caret_style.flags.inverse)
-                            fg_style
-                        else
-                            bg_style,
-                        else => unreachable,
-                    };
-                } else state.colors.background;
-
-                self.uniforms.cursor_color = .{
-                    caret_text_color.r,
-                    caret_text_color.g,
-                    caret_text_color.b,
-                    255,
-                };
-            }
-
             // Setup our preedit text.
             if (preedit) |preedit_v| preedit: {
                 const range = preedit_range orelse break :preedit;
@@ -2961,8 +2893,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Break shaping at the visible terminal cursor or caret so
                 // the glyph under a block cursor can be recolored separately.
                 .cursor_x = cursor_x: {
-                    const vp = state.caret orelse
-                        state.cursor.viewport orelse break :cursor_x null;
+                    const vp = state.cursor.viewport orelse break :cursor_x null;
                     if (vp.y != y) break :cursor_x null;
                     break :cursor_x vp.x;
                 },

@@ -56,6 +56,11 @@ handoff_gen: std.atomic.Value(u32) = .init(0),
 /// microseconds, so one millisecond is generous.
 const handoff_timeout_ns = 1 * std.time.ns_per_ms;
 
+/// The screen currently displayed by the surface. The caller must hold mutex.
+pub fn screen(self: *const State) *terminalpkg.Screen {
+    return self.caret_screen orelse self.terminal.screens.active;
+}
+
 /// Acquire `mutex` while signaling demand for it. Use this instead of
 /// locking the mutex directly on threads that must not be starved by
 /// a hot lock/unlock loop (the renderer's frame snapshot). Must be

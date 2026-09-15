@@ -61,13 +61,8 @@ saved_cursor: ?SavedCursor = null,
 /// automatically setup tracking.
 selection: ?Selection = null,
 
-/// Caret mode for keyboard navigation.
-caret_mode: bool = false,
-
-caret_viewport_pin: ?*Pin = null,
-
-/// Tracked position of the caret for keyboard navigation. Always a tracked
-/// pin so it stays valid as the buffer scrolls.
+/// Tracked position of the keyboard navigation caret. Null outside caret
+/// mode. Tracking preserves its position when the screen is resized.
 caret_pin: ?*Pin = null,
 
 /// Original caret position, independent of the displayed selection bounds.
@@ -2954,11 +2949,10 @@ fn clearCaretSelection(self: *Screen) void {
 /// the caret starts at the bottom of the viewport at the cursor's column.
 /// If already in caret mode this is a no-op.
 pub fn enterCaretMode(self: *Screen) Allocator.Error!void {
-    if (self.caret_mode) return;
+    if (self.caret_pin != null) return;
 
     const viewport_tl = self.pages.getTopLeft(.viewport);
     const viewport_br = self.pages.getBottomRight(.viewport).?;
-    self.pages.pinViewport(viewport_tl);
 
     var caret = self.cursor.page_pin.*;
     if (!caret.isBetween(viewport_tl, viewport_br)) {
@@ -2966,30 +2960,19 @@ pub fn enterCaretMode(self: *Screen) Allocator.Error!void {
         caret.x = @min(self.cursor.page_pin.x, caret.node.cols() - 1);
     }
 
-    const tracked = try self.pages.trackPin(caret);
-    errdefer self.pages.untrackPin(tracked);
-
-    const viewport_pin = try self.pages.trackPin(viewport_tl);
-    self.caret_viewport_pin = viewport_pin;
-
-    self.caret_pin = tracked;
-
-    self.caret_mode = true;
+    self.caret_pin = try self.pages.trackPin(caret);
+    self.dirty.selection = true;
+    self.updateCaret();
 }
 
-/// Exit caret mode, releasing the tracked caret pin and clearing any active selection
+/// Exit caret mode, releasing its tracked pins and clearing the selection.
+/// If caret mode is inactive this is a no-op.
 pub fn exitCaretMode(self: *Screen) void {
-    if (self.caret_pin) |pin| {
-        self.pages.untrackPin(pin);
-        self.caret_pin = null;
-    }
-    if (self.caret_viewport_pin) |pin| {
-        self.pages.untrackPin(pin);
-        self.caret_viewport_pin = null;
-    }
-    self.caret_mode = false;
+    const pin = self.caret_pin orelse return;
+    self.pages.untrackPin(pin);
+    self.caret_pin = null;
     self.clearSelection();
-    self.scroll(.{ .active = {} });
+    self.dirty.selection = true;
 }
 
 pub const CaretAdjustment = enum {
@@ -3219,10 +3202,16 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             -rows
         else
             rows });
-        if (self.caret_viewport_pin) |viewport| {
-            viewport.* = self.pages.getTopLeft(.viewport);
-        }
-    } else caret_scroll: {
+    }
+
+    self.updateCaret();
+}
+
+/// Keep the caret visible and update its selection after movement or resize.
+fn updateCaret(self: *Screen) void {
+    const pin = self.caret_pin orelse return;
+
+    caret_scroll: {
         // Other motions only scroll enough to keep the caret visible.
         const viewport_tl = self.pages.getTopLeft(.viewport);
         const viewport_br = self.pages.getBottomRight(.viewport).?;
@@ -3234,15 +3223,12 @@ pub fn moveCaret(self: *Screen, adjustment: CaretAdjustment) void {
             pin.*.up(self.pages.rows - 1) orelse pin.*;
 
         self.scroll(.{ .pin = target });
-        if (self.caret_viewport_pin) |viewport| {
-            viewport.* = self.pages.getTopLeft(.viewport);
-        }
     }
 
     // If a caret selection is active, update its bounds to follow the caret.
     if (self.caret_selection_anchor) |anchor| {
         const bounds = caretSelectionBounds(anchor.*, pin.*, self.caret_selection_style);
-        const sel = &(self.selection orelse return);
+        const sel = if (self.selection) |*sel| sel else return;
         sel.startPtr().* = bounds.start();
         sel.endPtr().* = bounds.end();
         sel.rectangle = bounds.rectangle;
@@ -4257,6 +4243,57 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
             self.cursor.pending_wrap = true;
         }
     }
+}
+
+test "Screen: caret lifecycle releases tracked pins" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer s.deinit();
+    try s.testWriteString("hello");
+
+    const tracked = s.pages.countTrackedPins();
+    for (0..3) |_| {
+        try s.enterCaretMode();
+        try s.enterCaretMode();
+        try testing.expectEqual(tracked + 1, s.pages.countTrackedPins());
+        try s.setCaretSelectionStyle(.character);
+        try s.setCaretSelectionStyle(.line);
+        try s.setCaretSelectionStyle(.rectangle);
+        try testing.expectEqual(tracked + 4, s.pages.countTrackedPins());
+        s.exitCaretMode();
+        s.exitCaretMode();
+        try testing.expectEqual(tracked, s.pages.countTrackedPins());
+        try testing.expect(s.selection == null);
+        try testing.expect(s.caret_selection_anchor == null);
+    }
+
+    try s.enterCaretMode();
+    try s.setCaretSelectionStyle(.character);
+    s.reset();
+    try testing.expect(s.caret_pin == null);
+    try testing.expectEqual(tracked, s.pages.countTrackedPins());
+}
+
+test "Screen: caret starts in the visible viewport" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback_bytes = null,
+    });
+    defer s.deinit();
+    for (0..20) |_| try s.testWriteString("hello\n");
+    s.cursorHorizontalAbsolute(3);
+
+    try s.enterCaretMode();
+    try testing.expect(s.caret_pin.?.eql(s.cursor.page_pin.*));
+    s.exitCaretMode();
+
+    s.scroll(.{ .row = 2 });
+    const viewport = s.pages.getTopLeft(.viewport);
+    try s.enterCaretMode();
+    try testing.expectEqual(point.Point{ .viewport = .{ .x = 3, .y = 2 } }, s.pages.pointFromPin(.viewport, s.caret_pin.?.*).?);
+    try testing.expect(viewport.eql(s.pages.getTopLeft(.viewport)));
 }
 
 test "Screen forwards optional scrollback limits" {
