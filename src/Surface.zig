@@ -282,9 +282,9 @@ pub const Keyboard = struct {
         once: bool,
     }) = .empty,
 
-    /// True while caret mode owns keyboard input. This is maintained on the
-    /// surface thread so key events can check it without locking terminal state.
-    caret_mode: bool = false,
+    /// The stack index of the key table owned by caret mode. Null when caret
+    /// mode is inactive. Only the surface thread accesses this value.
+    caret_mode: ?usize = null,
 
     /// The last handled binding. This is used to prevent encoding release
     /// events for handled bindings. We only need to keep track of one because
@@ -1778,26 +1778,6 @@ pub fn updateConfig(
         return;
     };
 
-    // Caret mode can't remain active when the new configuration disables it.
-    // Exit before deinitializing the old config because the active key table
-    // contains a pointer into it.
-    if (self.config.caret_mode and !derived.caret_mode) {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
-
-        _ = self.exitCaretMode() catch |err| {
-            log.warn("failed to exit caret mode after config change err={}", .{err});
-        };
-    }
-
-    self.config.deinit();
-    self.config = derived;
-
-    // If our mouse is hidden but we disabled mouse hiding, then show it again.
-    if (!self.config.mouse_hide_while_typing and self.mouse.hidden) {
-        self.showMouse();
-    }
-
     // If we are in the middle of a key sequence, clear it.
     self.endKeySequence(.drop, .free);
 
@@ -1808,6 +1788,14 @@ pub fn updateConfig(
     _ = self.deactivateAllKeyTables() catch |err| {
         log.warn("failed to deactivate key tables err={}", .{err});
     };
+
+    self.config.deinit();
+    self.config = derived;
+
+    // If our mouse is hidden but we disabled mouse hiding, then show it again.
+    if (!self.config.mouse_hide_while_typing and self.mouse.hidden) {
+        self.showMouse();
+    }
 
     // Before sending any other config changes, we give the renderer a new font
     // grid. We could check to see if there was an actual change to the font,
@@ -2744,7 +2732,7 @@ pub fn keyCallback(
 
     // Caret mode owns all keyboard input, including release events and
     // modifier-only events that don't match its key table.
-    if (self.keyboard.caret_mode) return .consumed;
+    if (self.keyboard.caret_mode != null) return .consumed;
 
     // If this input event has text, then we hide the mouse if configured.
     // We only do this on pressed events to avoid hiding the mouse when we
@@ -2892,7 +2880,7 @@ fn maybeHandleBinding(
 ) !?InputEffect {
     // Binding actions may change caret mode, but queued sequence input must
     // retain the ownership policy from when this event began processing.
-    const caret_mode = self.keyboard.caret_mode;
+    const caret_mode = self.keyboard.caret_mode != null;
 
     switch (event.action) {
         // Release events never trigger a binding but we need to check if
@@ -3125,9 +3113,16 @@ fn maybeHandleBinding(
 }
 
 fn deactivateAllKeyTables(self: *Surface) !bool {
+    var performed = false;
+    if (self.keyboard.caret_mode != null) {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        performed = try self.exitCaretMode();
+    }
+
     switch (self.keyboard.table_stack.items.len) {
         // No key table active. This does nothing.
-        0 => return false,
+        0 => return performed,
 
         // Clear the entire table stack.
         else => self.keyboard.table_stack.clearAndFree(self.alloc),
@@ -3146,6 +3141,41 @@ fn deactivateAllKeyTables(self: *Surface) !bool {
     };
 
     return true;
+}
+
+/// Pop a key table and notify the app. Caret teardown is handled by the caller.
+fn deactivateKeyTable(self: *Surface) bool {
+    switch (self.keyboard.table_stack.items.len) {
+        0 => return false,
+        1 => self.keyboard.table_stack.clearAndFree(self.alloc),
+        else => _ = self.keyboard.table_stack.pop(),
+    }
+
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .key_table,
+        .deactivate,
+    ) catch |err| {
+        log.warn("failed to notify app of key table err={}", .{err});
+    };
+    return true;
+}
+
+fn endSearch(self: *Surface) !bool {
+    const performed = self.search != null;
+    if (self.search) |*s| {
+        s.deinit();
+        self.search = null;
+    }
+
+    // Also notify the app when there is no worker, since the search UI can
+    // be open before the first query starts it.
+    _ = try self.rt_app.performAction(
+        .{ .surface = self },
+        .end_search,
+        {},
+    );
+    return performed;
 }
 
 /// This checks if the current keybinding sets have a catch_all binding
@@ -3518,7 +3548,7 @@ pub fn scrollCallback(
 
     // Caret mode owns the visible viewport. Ignore scroll input rather than
     // moving the viewport or forwarding mouse reports to the application.
-    if (self.keyboard.caret_mode) return;
+    if (self.keyboard.caret_mode != null) return;
 
     const y: ScrollAmount = if (yoff == 0) .{} else y: {
         // We use cell_size to determine if we have accumulated enough to trigger a scroll
@@ -4964,6 +4994,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .start_search => {
+            {
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+                _ = try self.exitCaretMode();
+            }
+
             // To save resources, we don't actually start a search here,
             // we just notify the apprt. The real thread will start when
             // the first needles are set.
@@ -4977,6 +5013,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         .search_selection => {
             const selection = try self.selectionString(self.alloc) orelse return false;
             defer self.alloc.free(selection);
+            {
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+                _ = try self.exitCaretMode();
+            }
             return try self.rt_app.performAction(
                 .{ .surface = self },
                 .start_search,
@@ -4984,27 +5025,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             );
         },
 
-        .end_search => {
-            // We only return that this was performed if we actually
-            // stopped a search, but we also send the apprt end_search so
-            // that GUIs can clean up stale stuff.
-            const performed = self.search != null;
-
-            if (self.search) |*s| {
-                s.deinit();
-                self.search = null;
-            }
-
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .end_search,
-                {},
-            );
-
-            return performed;
-        },
+        .end_search => return try self.endSearch(),
 
         .search => |text| search: {
+            {
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+                _ = try self.exitCaretMode();
+            }
+
             const s: *Search = if (self.search) |*s| s else init: {
                 // If we're stopping the search and we had no prior search,
                 // then there is nothing to do.
@@ -5289,7 +5318,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         .scroll_to_row => |n| {
             // Native scrollbars use this action for mouse-driven scrolling.
             // Keep the caret viewport fixed while caret mode is active.
-            if (self.keyboard.caret_mode) return false;
+            if (self.keyboard.caret_mode != null) return false;
 
             {
                 self.renderer_state.mutex.lockUncancelable(global.io());
@@ -5628,30 +5657,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .deactivate_key_table => {
-            switch (self.keyboard.table_stack.items.len) {
-                // No key table active. This does nothing.
-                0 => return false,
-
-                // Final key table active, clear our state.
-                1 => self.keyboard.table_stack.clearAndFree(self.alloc),
-
-                // Restore the prior key table. We don't free any memory in
-                // this case because we assume it will be freed later when
-                // we finish our key table.
-                else => _ = self.keyboard.table_stack.pop(),
+            if (self.keyboard.caret_mode) |depth| {
+                if (self.keyboard.table_stack.items.len == depth + 1) {
+                    self.renderer_state.mutex.lockUncancelable(global.io());
+                    defer self.renderer_state.mutex.unlock(global.io());
+                    return try self.exitCaretMode();
+                }
             }
 
-            // Notify the UI.
-            _ = self.rt_app.performAction(
-                .{ .surface = self },
-                .key_table,
-                .deactivate,
-            ) catch |err| {
-                log.warn(
-                    "failed to notify app of key table err={}",
-                    .{err},
-                );
-            };
+            return self.deactivateKeyTable();
         },
 
         .deactivate_all_key_tables => {
@@ -5731,14 +5745,19 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .enter_caret_mode => {
             if (!self.config.caret_mode) return false;
+            if (self.keyboard.caret_mode != null) return false;
+            if (!self.config.keybind.tables.contains("caret")) return false;
+            if (self.keyboard.table_stack.items.len >= max_active_key_tables)
+                return false;
+
+            // Search tracks pins in the live terminal. Stop its worker before
+            // locking so it can finish any outstanding terminal access.
+            _ = try self.endSearch();
 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            if (self.renderer_state.caret_screen != null) return false;
             const set = self.config.keybind.tables.getPtr("caret") orelse
-                return false;
-            if (self.keyboard.table_stack.items.len >= max_active_key_tables)
                 return false;
 
             const source = self.io.terminal.screens.active;
@@ -5768,8 +5787,9 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             });
 
             self.renderer_state.caret_screen = screen;
-            self.keyboard.caret_mode = true;
+            self.keyboard.caret_mode = self.keyboard.table_stack.items.len - 1;
             errdefer comptime unreachable;
+
             _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .key_table,
@@ -5862,29 +5882,26 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 /// This must be called with the renderer mutex held.
 fn exitCaretMode(self: *Surface) !bool {
     const screen = self.renderer_state.caret_screen orelse return false;
+    const depth = self.keyboard.caret_mode.?;
 
     screen.exitCaretMode();
     screen.deinit();
     self.alloc.destroy(screen);
     self.renderer_state.caret_screen = null;
     self.io.terminal.screens.active.scroll(.{ .active = {} });
-    self.keyboard.caret_mode = false;
+    self.io.terminal.screens.active.dirty.selection = true;
+    self.keyboard.caret_mode = null;
 
-    // Pop the "caret" key table.
-    switch (self.keyboard.table_stack.items.len) {
-        0 => {},
-        1 => self.keyboard.table_stack.clearAndFree(self.alloc),
-        else => _ = self.keyboard.table_stack.pop(),
+    // Discard incomplete sequences and all tables pushed during this session,
+    // restoring the stack that was active before entering caret mode.
+    self.endKeySequence(.drop, .retain);
+    while (self.keyboard.table_stack.items.len > depth) {
+        _ = self.deactivateKeyTable();
     }
-    _ = self.rt_app.performAction(
-        .{ .surface = self },
-        .key_table,
-        .deactivate,
-    ) catch |err| {
-        log.warn("failed to notify app of key table err={}", .{err});
-    };
 
-    try self.queueRender();
+    self.queueRender() catch |err| {
+        log.warn("failed to queue render after exiting caret mode err={}", .{err});
+    };
     return true;
 }
 

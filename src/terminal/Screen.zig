@@ -418,6 +418,8 @@ pub fn assertIntegrity(self: *const Screen) void {
 /// - Disables protection mode
 ///
 pub fn reset(self: *Screen) void {
+    self.exitCaretMode();
+
     // Reset our pages
     self.pages.reset();
 
