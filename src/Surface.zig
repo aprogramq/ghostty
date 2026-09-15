@@ -1961,7 +1961,8 @@ pub fn dumpTextLocked(
     sel: terminal.Selection,
 ) !Text {
     // Read out the text
-    const text = try self.io.terminal.screens.active.selectionString(alloc, .{
+    const screen = self.renderer_state.screen();
+    const text = try screen.selectionString(alloc, .{
         .sel = sel,
         .trim = false,
     });
@@ -1971,19 +1972,19 @@ pub fn dumpTextLocked(
     const vp: ?Text.Viewport = viewport: {
         // If our bottom right pin is before the viewport, then we can't
         // possibly have this text be within the viewport.
-        const vp_tl_pin = self.io.terminal.screens.active.pages.getTopLeft(.viewport);
-        const br_pin = sel.bottomRight(self.io.terminal.screens.active);
+        const vp_tl_pin = screen.pages.getTopLeft(.viewport);
+        const br_pin = sel.bottomRight(screen);
         if (br_pin.before(vp_tl_pin)) break :viewport null;
 
         // If our top-left pin is after the viewport, then we can't possibly
         // have this text be within the viewport.
-        const vp_br_pin = self.io.terminal.screens.active.pages.getBottomRight(.viewport) orelse {
+        const vp_br_pin = screen.pages.getBottomRight(.viewport) orelse {
             // I don't think this is possible but I don't want to crash on
             // that assertion so let's just break out...
             log.warn("viewport bottom-right pin not found, bug?", .{});
             break :viewport null;
         };
-        const tl_pin = sel.topLeft(self.io.terminal.screens.active);
+        const tl_pin = sel.topLeft(screen);
         if (vp_br_pin.before(tl_pin)) break :viewport null;
 
         // We established that our top-left somewhere before the viewport
@@ -1993,7 +1994,7 @@ pub fn dumpTextLocked(
 
         // Our top-left point. If it doesn't exist in the viewport it must
         // be before and we can return (0,0).
-        const tl_pt: terminal.Point = self.io.terminal.screens.active.pages.pointFromPin(
+        const tl_pt: terminal.Point = screen.pages.pointFromPin(
             .viewport,
             tl_pin,
         ) orelse tl: {
@@ -2006,7 +2007,7 @@ pub fn dumpTextLocked(
 
         // Our bottom-right point. If it doesn't exist in the viewport
         // it must be the bottom-right of the viewport.
-        const br_pt = self.io.terminal.screens.active.pages.pointFromPin(
+        const br_pt = screen.pages.pointFromPin(
             .viewport,
             br_pin,
         ) orelse br: {
@@ -2014,7 +2015,7 @@ pub fn dumpTextLocked(
                 assert(vp_br_pin.before(br_pin));
             }
 
-            break :br self.io.terminal.screens.active.pages.pointFromPin(
+            break :br screen.pages.pointFromPin(
                 .viewport,
                 vp_br_pin,
             ).?;
@@ -2055,8 +2056,8 @@ pub fn dumpTextLocked(
         };
 
         // Utilize viewport sizing to convert to offsets
-        const start = tl_coord.y * self.io.terminal.screens.active.pages.cols + tl_coord.x;
-        const end = br_coord.y * self.io.terminal.screens.active.pages.cols + br_coord.x;
+        const start = tl_coord.y * screen.pages.cols + tl_coord.x;
+        const end = br_coord.y * screen.pages.cols + br_coord.x;
 
         break :viewport .{
             .tl_px_x = x,
@@ -2076,15 +2077,16 @@ pub fn dumpTextLocked(
 pub fn hasSelection(self: *const Surface) bool {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    return self.io.terminal.screens.active.selection != null;
+    return self.renderer_state.screen().selection != null;
 }
 
 /// Returns the selected text. This is allocated.
 pub fn selectionString(self: *Surface, alloc: Allocator) !?[:0]const u8 {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    const sel = self.io.terminal.screens.active.selection orelse return null;
-    return try self.io.terminal.screens.active.selectionString(alloc, .{
+    const screen = self.renderer_state.screen();
+    const sel = screen.selection orelse return null;
+    return try screen.selectionString(alloc, .{
         .sel = sel,
         .trim = false,
     });
@@ -2363,24 +2365,27 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
     // Compute the transition before `select` below, which untracks (frees)
     // the previous selection's tracked pins; reading them after would be a
     // use-after-free.
-    const prev_ = self.io.terminal.screens.active.selection;
+    const screen = self.renderer_state.screen();
+    const prev_ = screen.selection;
     const changed = changed: {
         const prev = prev_ orelse break :changed sel_ != null;
         const sel = sel_ orelse break :changed true;
         break :changed !sel.eql(prev);
     };
 
-    try self.io.terminal.screens.active.select(sel_);
+    try screen.select(sel_);
 
-    if (changed) {
-        _ = self.rt_app.performAction(
-            .{ .surface = self },
-            .selection_changed,
-            {},
-        ) catch |err| {
-            log.warn("apprt failed selection_changed notification err={}", .{err});
-        };
-    }
+    if (changed) self.notifySelectionChanged();
+}
+
+fn notifySelectionChanged(self: *Surface) void {
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .selection_changed,
+        {},
+    ) catch |err| {
+        log.warn("apprt failed selection_changed notification err={}", .{err});
+    };
 }
 
 /// Set a selection and, per `copy_on_select`, copy it to the clipboard.
@@ -2389,13 +2394,14 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
 /// This must be called with the renderer mutex held.
 fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
     try self.setSelection(sel);
+    const screen = self.renderer_state.screen();
 
     switch (self.config.copy_on_select) {
         .none => {},
 
         // The selection clipboard is set if supported, otherwise nothing is copied.
         .primary => try self.copySelectionToClipboards(
-            self.io.terminal.screens.active,
+            screen,
             sel,
             &.{.selection},
             .mixed,
@@ -2403,7 +2409,7 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 
         // Only the standard clipboard is set.
         .clipboard => try self.copySelectionToClipboards(
-            self.io.terminal.screens.active,
+            screen,
             sel,
             &.{.standard},
             .mixed,
@@ -2411,7 +2417,7 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 
         // Both standard and selection clipboards are set.
         .both => try self.copySelectionToClipboards(
-            self.io.terminal.screens.active,
+            screen,
             sel,
             &.{ .standard, .selection },
             .mixed,
@@ -5154,8 +5160,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen = self.renderer_state.caret_screen orelse
-                self.io.terminal.screens.active;
+            const screen = self.renderer_state.screen();
             if (screen.selection) |sel| {
                 try self.copySelectionToClipboards(
                     screen,
@@ -5166,11 +5171,9 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
                 // Clear the selection if configured to do so.
                 if (self.config.selection_clear_on_copy) {
-                    if (self.renderer_state.caret_screen != null) {
-                        screen.clearSelection();
-                    } else if (self.setSelection(null)) {} else |err| {
+                    self.setSelection(null) catch |err| {
                         log.warn("failed to clear selection after copy err={}", .{err});
-                    }
+                    };
                     self.queueRender() catch |err| {
                         log.warn("failed to queue render after clear selection err={}", .{err});
                     };
@@ -5632,7 +5635,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const sel = self.io.terminal.screens.active.selectAll();
+            const sel = self.renderer_state.screen().selectAll();
             if (sel) |s| {
                 try self.setSelectionAndCopy(s);
                 try self.queueRender();
@@ -5750,7 +5753,16 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 
-            const screen: *terminal.Screen = self.io.terminal.screens.active;
+            const screen = self.renderer_state.screen();
+            if (screen.caret_pin != null) {
+                if (screen.selection == null) return false;
+                screen.moveCaret(switch (direction) {
+                    inline else => |tag| @field(terminal.Screen.CaretAdjustment, @tagName(tag)),
+                });
+                self.notifySelectionChanged();
+                try self.queueRender();
+                return true;
+            }
             const sel = if (screen.selection) |*sel| sel else {
                 // If we don't have a selection we do not perform this
                 // action, allowing the keybind to fall through to the
@@ -5862,6 +5874,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             ) catch |err| {
                 log.warn("failed to notify app of key table err={}", .{err});
             };
+            self.notifySelectionChanged();
 
             // Ownership has transferred to renderer_state. A failed wakeup
             // must not run the allocation cleanup above.
@@ -5902,6 +5915,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .big_word_right => .big_word_right,
             });
 
+            if (screen.selection != null) self.notifySelectionChanged();
             try self.queueRender();
         },
 
@@ -5912,7 +5926,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen = self.renderer_state.caret_screen orelse return false;
 
             try screen.setCaretSelectionStyle(.character);
-
+            self.notifySelectionChanged();
             try self.queueRender();
         },
 
@@ -5923,7 +5937,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen = self.renderer_state.caret_screen orelse return false;
 
             try screen.setCaretSelectionStyle(.rectangle);
-
+            self.notifySelectionChanged();
             try self.queueRender();
         },
 
@@ -5934,7 +5948,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen = self.renderer_state.caret_screen orelse return false;
 
             try screen.selectCaretLine();
-
+            self.notifySelectionChanged();
             try self.queueRender();
         },
     }
@@ -5964,6 +5978,7 @@ fn exitCaretMode(self: *Surface) !bool {
         _ = self.deactivateKeyTable();
     }
 
+    self.notifySelectionChanged();
     self.queueRender() catch |err| {
         log.warn("failed to queue render after exiting caret mode err={}", .{err});
     };
@@ -6038,12 +6053,13 @@ fn writeScreenFile(
         // We only dump history if we have history. We still keep
         // the file and write the empty file to the pty so that this
         // command always works on the primary screen.
-        const pages = &self.io.terminal.screens.active.pages;
+        const visible_screen = self.renderer_state.screen();
+        const pages = &visible_screen.pages;
         const sel_: ?terminal.Selection = switch (loc) {
             .history => history: {
                 // We do not support this for alternate screens
                 // because they don't have scrollback anyways.
-                if (self.io.terminal.screens.active_key == .alternate) {
+                if (visible_screen.no_scrollback) {
                     break :history null;
                 }
 
@@ -6064,7 +6080,7 @@ fn writeScreenFile(
                 );
             },
 
-            .selection => self.io.terminal.screens.active.selection,
+            .selection => visible_screen.selection,
         };
 
         const sel = sel_ orelse {
@@ -6073,7 +6089,7 @@ fn writeScreenFile(
         };
 
         const ScreenFormatter = terminal.formatter.ScreenFormatter;
-        var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, .{
+        var formatter: ScreenFormatter = .init(visible_screen, .{
             .emit = switch (write_screen.emit) {
                 .plain => .plain,
                 .vt => .vt,
@@ -6086,7 +6102,7 @@ fn writeScreenFile(
             .palette = &self.io.terminal.colors.palette.current,
         });
         formatter.content = .{ .selection = sel.ordered(
-            self.io.terminal.screens.active,
+            visible_screen,
             .forward,
         ) };
         try formatter.format(buf_writer);

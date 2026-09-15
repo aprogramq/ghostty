@@ -3270,17 +3270,15 @@ pub fn setCaretSelectionStyle(
 ) Allocator.Error!void {
     const caret = self.caret_pin orelse return;
 
-    // A selection created outside caret mode must not become the anchor for a
-    // keyboard selection.
-    if (self.selection != null and self.caret_selection_anchor == null) {
+    if (self.caret_selection_anchor != null and
+        self.caret_selection_style == selection_style)
+    {
         self.clearSelection();
-    } else if (self.selection != null) {
-        if (self.caret_selection_style == selection_style) {
-            self.clearSelection();
-            return;
-        }
+        return;
     }
 
+    // Selections created outside caret mode have no caret anchor. Replace
+    // them only after allocating the new selection so failure preserves them.
     const origin = if (self.caret_selection_anchor) |anchor|
         anchor.*
     else
@@ -4296,6 +4294,84 @@ test "Screen: caret starts in the visible viewport" {
     try s.enterCaretMode();
     try testing.expectEqual(point.Point{ .viewport = .{ .x = 3, .y = 2 } }, s.pages.pointFromPin(.viewport, s.caret_pin.?.*).?);
     try testing.expect(viewport.eql(s.pages.getTopLeft(.viewport)));
+}
+
+test "Screen: caret selection styles preserve anchor and direction" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer s.deinit();
+    try s.testWriteString("abcdefgh\nijklmnop\nqrstuvwx");
+    s.cursorAbsolute(5, 2);
+    try s.enterCaretMode();
+    try s.setCaretSelectionStyle(.character);
+    const anchor = s.caret_pin.?.*;
+    s.moveCaret(.up);
+    s.moveCaret(.left);
+    const caret = s.caret_pin.?.*;
+
+    try s.selectCaretLine();
+    try testing.expectEqual(0, s.selection.?.start().x);
+    try testing.expectEqual(7, s.selection.?.end().x);
+    try testing.expect(s.caret_selection_anchor.?.eql(anchor));
+
+    try s.setCaretSelectionStyle(.rectangle);
+    try testing.expect(s.selection.?.rectangle);
+    try testing.expect(s.selection.?.start().eql(anchor));
+    try testing.expect(s.selection.?.end().eql(caret));
+    try s.setCaretSelectionStyle(.character);
+    try testing.expect(!s.selection.?.rectangle);
+    try testing.expect(s.selection.?.start().eql(anchor));
+    try testing.expect(s.selection.?.end().eql(caret));
+
+    // Selecting the active style again clears it, so the next selection starts
+    // at the caret rather than reusing the old anchor.
+    try s.setCaretSelectionStyle(.character);
+    try testing.expect(s.selection == null);
+    s.moveCaret(.left);
+    try s.selectCaretLine();
+    try testing.expect(s.caret_selection_anchor.?.eql(s.caret_pin.?.*));
+    try s.selectCaretLine();
+    try testing.expect(s.selection == null);
+}
+
+test "Screen: caret replaces existing selection without adopting its anchor" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer s.deinit();
+    try s.testWriteString("hello");
+    try s.select(s.selectAll());
+    try s.enterCaretMode();
+    const existing = s.selection.?;
+    s.moveCaret(.left);
+    try testing.expect(s.selection.?.eql(existing));
+    try s.setCaretSelectionStyle(.character);
+    try testing.expect(s.selection.?.start().eql(s.caret_pin.?.*));
+    try testing.expect(s.selection.?.end().eql(s.caret_pin.?.*));
+
+    s.clearSelection();
+    s.moveCaret(.left);
+    try testing.expect(s.selection == null);
+    try testing.expect(s.caret_selection_anchor == null);
+}
+
+test "Screen: caret line selection uses visual rows" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 6, .rows = 3 });
+    defer s.deinit();
+    try s.testWriteString("abcdefghijkl");
+    try s.enterCaretMode();
+    s.moveCaret(.home);
+    s.moveCaret(.right);
+    try s.selectCaretLine();
+    const text = try s.selectionString(alloc, .{ .sel = s.selection.? });
+    defer alloc.free(text);
+    try testing.expectEqualStrings("abcdef", text);
+
+    s.moveCaret(.down);
+    const expanded = try s.selectionString(alloc, .{ .sel = s.selection.? });
+    defer alloc.free(expanded);
+    try testing.expectEqualStrings("abcdefghijkl", expanded);
 }
 
 test "Screen: caret selection survives reflow" {
