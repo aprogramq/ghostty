@@ -310,6 +310,7 @@ const DerivedConfig = struct {
     clipboard_paste_bracketed_safe: bool,
     clipboard_codepoint_map: configpkg.Config.RepeatableClipboardCodepointMap,
     copy_on_select: configpkg.CopyOnSelect,
+    caret_mode: bool,
     right_click_action: configpkg.RightClickAction,
     middle_click_action: configpkg.MiddleClickAction,
     confirm_close_surface: configpkg.ConfirmCloseSurface,
@@ -390,6 +391,7 @@ const DerivedConfig = struct {
             .clipboard_paste_bracketed_safe = config.@"clipboard-paste-bracketed-safe",
             .clipboard_codepoint_map = try config.@"clipboard-codepoint-map".clone(alloc),
             .copy_on_select = config.@"copy-on-select",
+            .caret_mode = config.@"caret-mode",
             .right_click_action = config.@"right-click-action",
             .middle_click_action = config.@"middle-click-action",
             .confirm_close_surface = config.@"confirm-close-surface",
@@ -5707,6 +5709,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .enter_caret_mode => {
+            if (!self.config.caret_mode) return false;
+
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
 

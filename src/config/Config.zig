@@ -772,6 +772,17 @@ foreground: Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
 /// Available since: 1.3.0
 @"selection-word-chars": SelectionWordChars = .{},
 
+/// Whether keyboard-driven caret navigation is available.
+///
+/// When enabled, the default `ctrl+shift+x` keybinding (`cmd+shift+x` on macOS)
+/// enters caret mode. This does not enter caret mode automatically. The default
+/// keybinding can be overridden like any other keybinding.
+///
+/// The default value is `false`.
+///
+/// Available since: 1.4.0
+@"caret-mode": bool = false,
+
 /// The minimum contrast ratio between the foreground and background colors.
 /// The contrast ratio is a value between 1 and 21. A value of 1 allows for no
 /// contrast (e.g. black on black). This value is the contrast ratio as defined
@@ -6742,8 +6753,19 @@ pub const Keybinds = struct {
         );
 
         // Built-in "caret" key table for keyboard-driven scrollback navigation.
-        // Users activate it by binding `enter_caret_mode` to a key.
+        // The default binding is performable so it falls through to the
+        // terminal when caret mode is disabled or otherwise unavailable.
         {
+            try self.set.putFlags(
+                alloc,
+                .{
+                    .key = .{ .unicode = 'x' },
+                    .mods = inputpkg.ctrlOrSuper(.{ .shift = true }),
+                },
+                .enter_caret_mode,
+                .{ .performable = true },
+            );
+
             const gop = try self.tables.getOrPut(alloc, "caret");
             if (!gop.found_existing) {
                 gop.key_ptr.* = "caret";
@@ -8159,8 +8181,9 @@ pub const Keybinds = struct {
         // Reset to defaults (empty value)
         try keybinds.parseCLI(alloc, "");
 
-        // Tables should be cleared, root set has defaults
-        try testing.expectEqual(0, keybinds.tables.count());
+        // User tables should be cleared, leaving only built-in tables.
+        try testing.expectEqual(1, keybinds.tables.count());
+        try testing.expect(keybinds.tables.contains("caret"));
         try testing.expect(keybinds.set.bindings.count() > 0);
     }
 };
