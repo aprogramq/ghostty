@@ -525,6 +525,14 @@ pub const State = struct {
             text_end orelse @intCast(self.kitty_placements.items.len);
     }
 
+    /// Hide Kitty placements while retaining the cached image textures.
+    pub fn kittyClear(self: *State) void {
+        self.kitty_placements.clearRetainingCapacity();
+        self.kitty_bg_end = 0;
+        self.kitty_text_end = 0;
+        self.kitty_virtual = false;
+    }
+
     const PrepImageError = error{
         OutOfMemory,
         ImageConversionError,

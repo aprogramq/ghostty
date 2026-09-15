@@ -148,10 +148,6 @@ pub const RenderState = struct {
     /// use cases.
     row_data: std.MultiArrayList(Row),
 
-    /// Caret position within the viewport. Null when caret mode is inactive
-    /// or the caret is scrolled out of view.
-    caret: ?Cursor.Viewport = null,
-
     /// The dirty state of the render state. This is set by the update method.
     /// The renderer/caller should set this to false when it has handled
     /// the dirty state.
@@ -491,65 +487,6 @@ pub const RenderState = struct {
         self.endUpdate();
     }
 
-    /// Update only caret-related state while preserving the previously copied
-    /// viewport rows. This is used to freeze visible contents during caret mode
-    /// without pausing terminal output in the background.
-    pub fn updateCaretOnly(self: *RenderState, s: *Screen) bool {
-        const viewport_pin = self.viewport_pin orelse return false;
-        const caret_viewport_pin = if (s.caret_viewport_pin) |pin|
-            pin.*
-        else
-            s.pages.getTopLeft(.viewport);
-
-        if (!viewport_pin.eql(caret_viewport_pin)) return false;
-
-        self.cursor.visible = false;
-        self.caret = null;
-        self.dirty = .full;
-
-        const row_data = self.row_data.slice();
-        const row_pins = row_data.items(.pin);
-        const row_sels = row_data.items(.selection);
-        @memset(row_sels, null);
-
-        const cp = s.caret_pin orelse {
-            self.updateSelection(s, row_pins, row_sels, true, true);
-            return true;
-        };
-
-        var y: usize = 0;
-        var page_it = viewport_pin.pageIterator(.right_down, null);
-        while (y < self.rows) {
-            const chunk = page_it.next() orelse break;
-            const node = chunk.node;
-
-            const take: usize = @min(
-                @as(usize, chunk.end - chunk.start),
-                self.rows - y,
-            );
-
-            if (cp.node == node) {
-                const cy = cp.y;
-                if (cy >= chunk.start and cy < chunk.start + take) {
-                    const rac = cp.rowAndCell();
-                    self.caret = .{
-                        .y = @intCast(y + (cy - chunk.start)),
-                        .x = cp.x,
-                        .wide_tail = if (cp.x > 0)
-                            rac.cell.wide == .spacer_tail
-                        else
-                            false,
-                    };
-                    break;
-                }
-            }
-            y += take;
-        }
-
-        self.updateSelection(s, row_pins, row_sels, true, true);
-        return true;
-    }
-
     /// Begin an update of the render state to the latest terminal
     /// state. Every begin must be completed with an `endUpdate` call
     /// before the render state is read.
@@ -588,10 +525,8 @@ pub const RenderState = struct {
         t: *Terminal,
         s: *Screen,
     ) Allocator.Error!void {
-        const viewport_pin = if (s.caret_mode)
-            if (s.caret_viewport_pin) |pin| pin.* else s.pages.getTopLeft(.viewport)
-        else
-            s.pages.getTopLeft(.viewport);
+        const viewport_pin = s.pages.getTopLeft(.viewport);
+        const previous_cursor = self.cursor.viewport;
 
         // The overscan rows to capture beyond the viewport. The request
         // decides the layout of row_data, and the actual counts are
@@ -627,7 +562,6 @@ pub const RenderState = struct {
         // The index of top.pin in row_data.
         const first: usize = above_req - top.above;
 
-
         const redraw = redraw: {
             // If our screen key changed, we need to do a full rebuild
             // because our render state is viewport-specific.
@@ -645,7 +579,7 @@ pub const RenderState = struct {
             // a full screen dirty tracker.
             {
                 const Int = @typeInfo(Screen.Dirty).@"struct".backing_integer.?;
-                const v: Int = @bitCast(t.screens.active.dirty);
+                const v: Int = @bitCast(s.dirty);
                 if (v > 0) break :redraw true;
             }
 
@@ -690,9 +624,18 @@ pub const RenderState = struct {
         // probably cache this by comparing the cursor pin and viewport pin
         // but may not be worth it.
         self.cursor.viewport = null;
-        self.caret = null;
-        if (s.caret_mode) {
-            self.cursor.visible = false;
+
+        // Caret navigation uses the same cursor data as terminal rendering.
+        // This keeps cursor colors, focus styling, and wide cells consistent.
+        const cursor_pin = s.caret_pin orelse s.cursor.page_pin;
+        if (s.caret_pin) |pin| {
+            const cell = pin.rowAndCell().cell;
+            self.cursor.cell = cell.*;
+            self.cursor.style = pin.style(cell);
+            self.cursor.visual_style = .block;
+            self.cursor.password_input = false;
+            self.cursor.visible = true;
+            self.cursor.blinking = false;
         }
 
         // Colors.
@@ -822,9 +765,9 @@ pub const RenderState = struct {
             // if rows are not dirty because the cursor is unrelated. We
             // can check the chunk bounds once rather than every row.
             if (self.cursor.viewport == null and
-                node == s.cursor.page_pin.node)
+                node == cursor_pin.node)
             cursor: {
-                const cy = s.cursor.page_pin.y;
+                const cy = cursor_pin.y;
                 if (cy < chunk.start or cy >= chunk.start + take) break :cursor;
 
                 // The cursor may be in an overscan row, in which case it
@@ -834,12 +777,12 @@ pub const RenderState = struct {
                 if (idx < vp_start or idx >= vp_start + self.rows) break :cursor;
                 self.cursor.viewport = .{
                     .y = @intCast(idx - vp_start),
-                    .x = s.cursor.x,
+                    .x = cursor_pin.x,
 
                     // Future: we should use our own state here to look this
                     // up rather than calling this.
-                    .wide_tail = if (s.cursor.x > 0)
-                        s.cursorCellLeft(1).wide == .wide
+                    .wide_tail = if (cursor_pin.x > 0)
+                        cursor_pin.rowAndCell().cell.wide == .spacer_tail
                     else
                         false,
                 };
@@ -850,27 +793,6 @@ pub const RenderState = struct {
             // this iteration and we're the only consumer of dirty state.
             const page_dirty = p.dirty;
             if (page_dirty) p.dirty = false;
-            // Find the caret position within the viewport.
-            if (s.caret_mode) {
-                if (self.caret == null) {
-                    if (s.caret_pin) |cp| {
-                        if (cp.node == node) {
-                            const cy = cp.y;
-                            if (cy >= chunk.start and cy < chunk.start + take) {
-                                const rac = cp.rowAndCell();
-                                self.caret = .{
-                                    .y = @intCast(y + (cy - chunk.start)),
-                                    .x = cp.x,
-                                    .wide_tail = if (cp.x > 0)
-                                        rac.cell.wide == .spacer_tail
-                                    else
-                                        false,
-                                };
-                            }
-                        }
-                    }
-                }
-            }
 
             // Get our contiguous rows for this chunk.
             const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..][0..take];
@@ -949,6 +871,18 @@ pub const RenderState = struct {
             .above = @intCast(top.above),
             .below = @intCast(below),
         };
+
+        // Moving the caret changes shaping boundaries even when the snapshot
+        // cells are unchanged. Rebuild both its old and new rows.
+        if (s.caret_pin != null and
+            !std.meta.eql(previous_cursor, self.cursor.viewport))
+        {
+            if (previous_cursor) |vp| {
+                if (vp.y < self.rows) row_dirties[self.viewportStart() + vp.y] = true;
+            }
+            if (self.cursor.viewport) |vp| row_dirties[self.viewportStart() + vp.y] = true;
+            any_dirty = true;
+        }
 
         // If our screen has a selection, then mark the rows with the
         // selection. We do this outside of the loop above because its unlikely
@@ -1791,7 +1725,8 @@ test "caret screen preserves rendered and selected text" {
     // Updating the live terminal must not change either the rendered cells or
     // the text selected from the caret screen.
     stream.nextSlice("AFTER!");
-    try testing.expect(state.updateCaretOnly(&screen));
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
     try testing.expectEqual(
         @as(u21, 'b'),
         state.row_data.items(.cells)[0].get(0).raw.codepoint(),
@@ -1822,6 +1757,61 @@ test "caret screen preserves rendered and selected text" {
     formatter.content = .{ .selection = screen.selection.? };
     try formatter.format(&aw.writer);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "before") != null);
+}
+
+test "caret render updates selection and shaping rows" {
+    try testCaretRender(.{});
+}
+
+test "caret render updates selection and shaping rows with overscan" {
+    try testCaretRender(.{ .above = 2, .below = 1 });
+}
+
+fn testCaretRender(overscan: RenderState.Overscan) !void {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try Terminal.init(testing.io, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+    try t.screens.active.testWriteString("hello\nworld");
+    t.modes.set(.cursor_visible, false);
+    t.modes.set(.cursor_blinking, true);
+
+    var screen = try t.screens.active.clone(testing.io, alloc, .{ .screen = .{} }, null);
+    defer screen.deinit();
+    try screen.enterCaretMode();
+    screen.moveCaret(.home);
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    state.overscan_request = overscan;
+    const vp_start = state.viewportStart();
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+    state.clean();
+
+    screen.moveCaret(.down);
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+    try testing.expect(state.cursor.visible);
+    try testing.expect(!state.cursor.blinking);
+    try testing.expectEqual(1, state.cursor.viewport.?.y);
+    try testing.expect(state.row_data.items(.dirty)[vp_start]);
+    try testing.expect(state.row_data.items(.dirty)[vp_start + 1]);
+    try testing.expect(!state.row_data.items(.dirty)[vp_start + 2]);
+    state.clean();
+
+    try screen.setCaretSelectionStyle(.character);
+    screen.moveCaret(.right);
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+    try testing.expectEqual(1, state.cursor.viewport.?.x);
+    try testing.expectEqual([2]size.CellCountInt{ 0, 1 }, state.row_data.items(.selection)[vp_start + 1].?);
+    state.clean();
+
+    screen.clearSelection();
+    try state.beginUpdateScreen(alloc, &t, &screen);
+    state.endUpdate();
+    try testing.expect(state.row_data.items(.selection)[vp_start + 1] == null);
+    try testing.expect(state.selection_cache == null);
 }
 
 test "styled text" {
