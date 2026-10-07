@@ -5932,7 +5932,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const source = self.io.terminal.screens.active;
             const screen = try self.alloc.create(terminal.Screen);
             errdefer self.alloc.destroy(screen);
-            screen.* = try source.clone(
+            screen.* = try source.cloneCompressed(
                 global.io(),
                 self.alloc,
                 .{ .screen = .{} },

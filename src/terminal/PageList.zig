@@ -1073,6 +1073,12 @@ pub const Clone = struct {
     // Any pins not present in the map were not remapped.
     tracked_pins: ?*TrackedPinsRemap = null,
 
+    /// Keep complete historical pages compressed in the clone. Compressed
+    /// source pages are decoded into temporary storage so their representation
+    /// is preserved, and destination history is compressed as it is built.
+    /// Compression is best effort and has no effect on unsupported targets.
+    compress_history: bool = false,
+
     pub const TrackedPinsRemap = std.AutoHashMap(*Pin, *Pin);
 };
 
@@ -1096,17 +1102,21 @@ pub fn clone(
 
     // First, count our pages so our preheat is exactly what we need.
     var it_copy = it;
-    const page_count: usize = page_count: {
+    const counts: struct { pages: usize, rows: usize } = counts: {
         var count: usize = 0;
-        while (it_copy.next()) |_| count += 1;
-        break :page_count count;
+        var rows: usize = 0;
+        while (it_copy.next()) |chunk| {
+            count += 1;
+            rows += chunk.end - chunk.start;
+        }
+        break :counts .{ .pages = count, .rows = rows };
     };
 
     // Setup our pool
     var pool: MemoryPool = try .init(
         alloc,
         pageAllocator(alloc),
-        page_count,
+        counts.pages,
     );
     errdefer pool.deinit();
 
@@ -1124,6 +1134,7 @@ pub fn clone(
     var page_serial: u64 = 0;
     var total_rows: usize = 0;
     var page_size: usize = 0;
+    const history_rows = counts.rows -| self.rows;
     while (it.next()) |chunk| {
         // Clone the page. We have to use createPageExt here because
         // we don't know if the source page has a standard size.
@@ -1139,18 +1150,24 @@ pub fn clone(
         page_list.append(node);
 
         const dst_page = node.page();
-        const src_page = chunk.node.page();
         assert(node.capacity().rows >= chunk.end - chunk.start);
-        defer dst_page.assertIntegrity();
         dst_page.size.rows = chunk.end - chunk.start;
         dst_page.size.cols = chunk.node.cols();
-        try dst_page.cloneFrom(
-            src_page,
-            chunk.start,
-            chunk.end,
-        );
 
-        dst_page.dirty = src_page.dirty;
+        if (opts.compress_history) {
+            // Read compressed sources through temporary storage so cloning a
+            // terminal does not make its cold history resident again.
+            var preserved = try chunk.node.pagePreservingState(alloc);
+            defer preserved.deinit();
+            const src_page = preserved.page();
+            try dst_page.cloneFrom(src_page, chunk.start, chunk.end);
+            dst_page.dirty = src_page.dirty;
+        } else {
+            const src_page = chunk.node.page();
+            try dst_page.cloneFrom(src_page, chunk.start, chunk.end);
+            dst_page.dirty = src_page.dirty;
+        }
+        dst_page.assertIntegrity();
 
         total_rows += node.rows();
 
@@ -1170,6 +1187,12 @@ pub fn clone(
                 try remap.putNoClobber(p, new_p);
                 try tracked_pins.putNoClobber(pool.alloc, new_p, {});
             }
+        }
+
+        // Only complete pages wholly above the active area are eligible. Do
+        // this page-by-page so the clone never holds all history resident.
+        if (opts.compress_history and total_rows <= history_rows) {
+            _ = compressPageExt(&pool, node);
         }
     }
 
@@ -5005,6 +5028,10 @@ fn compressFull(self: *PageList) void {
 /// usable. Candidate selection and retry policy belong to `compress`; this
 /// primitive only performs one state transition.
 fn compressPage(self: *PageList, node: *List.Node) bool {
+    return compressPageExt(&self.pool, node);
+}
+
+fn compressPageExt(pool: *MemoryPool, node: *List.Node) bool {
     // Recompression requires first restoring the raw page and is a policy
     // decision, so this primitive only accepts resident nodes.
     if (node.isCompressed()) return false;
@@ -5028,7 +5055,7 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
     // exact-sized encoded allocation survives the scope.
     const candidate = candidate: {
         var scratch = CompressionScratch.init(
-            &self.pool,
+            pool,
             required,
             page.memory.len,
         ) catch |err| switch (err) {
@@ -5039,11 +5066,11 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
         // how many on success. Track that so returning the scratch only
         // clears the prefix it dirtied instead of the whole item.
         var dirty_len: usize = required;
-        defer scratch.deinit(&self.pool, dirty_len);
+        defer scratch.deinit(pool, dirty_len);
 
         var table: compression.lz4.HashTable = undefined;
         const result = compression.Page.init(
-            self.pool.alloc,
+            pool.alloc,
             page,
             scratch.bytes()[0..required],
             &table,

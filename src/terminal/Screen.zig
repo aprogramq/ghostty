@@ -520,6 +520,33 @@ pub fn clone(
     top: point.Point,
     bot: ?point.Point,
 ) !Screen {
+    return self.cloneImpl(io, alloc, top, bot, false);
+}
+
+/// Clone the screen while keeping complete historical pages compressed.
+///
+/// Unlike `clone`, this doesn't restore compressed source history. Destination
+/// history is compressed page-by-page as it is copied, so at most one source
+/// history page is temporarily decoded. Pages intersecting the active area
+/// remain resident. Compression is best effort on supported targets.
+pub fn cloneCompressed(
+    self: *const Screen,
+    io: std.Io,
+    alloc: Allocator,
+    top: point.Point,
+    bot: ?point.Point,
+) !Screen {
+    return self.cloneImpl(io, alloc, top, bot, true);
+}
+
+fn cloneImpl(
+    self: *const Screen,
+    io: std.Io,
+    alloc: Allocator,
+    top: point.Point,
+    bot: ?point.Point,
+    compress_history: bool,
+) !Screen {
     // Create a tracked pin remapper for our selection and cursor. Note
     // that we may want to expose this generally in the future but at the
     // time of doing this we don't need to.
@@ -530,6 +557,7 @@ pub fn clone(
         .top = top,
         .bot = bot,
         .tracked_pins = &pin_remap,
+        .compress_history = compress_history,
     });
     errdefer pages.deinit();
 
